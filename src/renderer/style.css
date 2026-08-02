@@ -448,20 +448,32 @@ body {
 }
 /* サイドバーの縦スクロールバーを細く */
 #left-pane::-webkit-scrollbar,
-.rview::-webkit-scrollbar {
+.rview::-webkit-scrollbar,
+.subview::-webkit-scrollbar,
+#landmark-list::-webkit-scrollbar,
+#route-list::-webkit-scrollbar {
   width: 6px;
 }
 #left-pane::-webkit-scrollbar-thumb,
-.rview::-webkit-scrollbar-thumb {
+.rview::-webkit-scrollbar-thumb,
+.subview::-webkit-scrollbar-thumb,
+#landmark-list::-webkit-scrollbar-thumb,
+#route-list::-webkit-scrollbar-thumb {
   background: var(--border-strong);
   border-radius: 3px;
 }
 #left-pane::-webkit-scrollbar-thumb:hover,
-.rview::-webkit-scrollbar-thumb:hover {
+.rview::-webkit-scrollbar-thumb:hover,
+.subview::-webkit-scrollbar-thumb:hover,
+#landmark-list::-webkit-scrollbar-thumb:hover,
+#route-list::-webkit-scrollbar-thumb:hover {
   background: var(--handle);
 }
 #left-pane::-webkit-scrollbar-track,
-.rview::-webkit-scrollbar-track {
+.rview::-webkit-scrollbar-track,
+.subview::-webkit-scrollbar-track,
+#landmark-list::-webkit-scrollbar-track,
+#route-list::-webkit-scrollbar-track {
   background: transparent;
 }
 .card {
@@ -978,8 +990,62 @@ button.primary:hover {
 #rview-library.detail .lib-item:not(.selected) {
   display: none;
 }
+/* 詳細モードは「操作部＝固定 / 一覧＝スクロール」に分ける。
+   #rview-library → #ws-panel → #ws-detail → .subview → 一覧(ul) の各段で縦flexを繋ぎ、
+   末端の一覧だけをスクロール領域にする（min-height:0 が無いと縮まずに溢れる）。
+   こうするとサブタブ見出しも取得/追加ボタンも常に見えたまま、一覧だけが伸び縮みする。 */
+/* こちらも :not(.hidden) が要る（`.rview.hidden` より ID のぶん詳細度が高いため、
+   付けないと環境設定タブへ切り替えてもライブラリ側が隠れなくなる）。 */
+#rview-library.detail:not(.hidden) {
+  overflow-y: hidden;
+  display: flex;
+  flex-direction: column;
+}
+#rview-library.detail > #ws-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#rview-library.detail #ws-panel > * {
+  flex: 0 0 auto;
+}
 #rview-library.detail #ws-detail {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+#rview-library.detail #ws-detail > * {
+  flex: 0 0 auto;
+}
+/* :not(.hidden) を付けないと、この規則が `.subview.hidden { display: none }` より
+   詳細度で勝ってしまい、非表示のはずのサブタブの中身まで一緒に表示されてしまう。 */
+#rview-library.detail #ws-detail > .subview:not(.hidden) {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#rview-library.detail .subview > * {
+  flex: 0 0 auto;
+}
+/* 一覧だけが残りの高さを取ってスクロールする */
+#rview-library.detail #landmark-list,
+#rview-library.detail #route-list {
+  flex: 1 1 auto;
+  min-height: 80px; /* 操作部が高いタブでも一覧が潰れきらないように */
+  overflow-y: auto;
+  padding-right: 8px;
+  scrollbar-width: thin; /* Firefox 系 */
+  scrollbar-color: var(--border-strong) transparent;
+}
+/* エクスポートは一覧を持たないので、サブビュー全体をスクロールさせる */
+#rview-library.detail #subview-export {
+  overflow-y: auto;
+  padding-right: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
 }
 
 .export-group {
@@ -1003,7 +1069,8 @@ button.primary:hover {
   background: var(--accent);
   border-color: var(--accent-bright);
 }
-#landmark-list {
+#landmark-list,
+#route-list {
   list-style: none;
   margin: 10px 0 0;
   padding: 0;
@@ -1016,6 +1083,11 @@ button.primary:hover {
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px;
+}
+/* 3Dビューでクリックして選ばれたルートの行 */
+.lm-item.picked {
+  border-color: var(--accent-bright);
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg));
 }
 .lm-top {
   display: flex;

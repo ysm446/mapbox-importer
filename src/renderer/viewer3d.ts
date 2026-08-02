@@ -254,6 +254,9 @@ export class TerrainViewer {
   // カーブ単位の距離/勾配ラベル（routeGroup の子スプライト）。declutter で重なり回避する。
   private routeLabels: { sprite: THREE.Sprite; category: RouteCategory; worldLen: number }[] = []
   private routeLabelsVisible = true
+  // 種別ごとにまとめた線分メッシュ。クリックでルートを拾うためのレイキャスト対象。
+  private routeLineObjs: THREE.LineSegments[] = []
+  private onPickRoute: ((routeId: string) => void) | null = null
   private routeDistanceMode: 'horizontal' | 'surface' = 'horizontal'
   // 種別ごとの表示フラグ（「ルートを表示」全体の ON/OFF とは別に効かせる）
   private routeCatVisible: Record<RouteCategory, boolean> = {
@@ -435,6 +438,12 @@ export class TerrainViewer {
         const p = this.terrainHit(e)
         const ll = p && this.pointToLngLat(p)
         if (ll) this.onPlace?.(ll.lng, ll.lat)
+        return
+      }
+      // 通常時：ドラッグでない左クリックでルート線を選択（一覧側でその行へジャンプさせる）
+      if (!moved && this.onPickRoute) {
+        const routeId = this.pickRouteId(e)
+        if (routeId) this.onPickRoute(routeId)
       }
     })
 
@@ -988,6 +997,7 @@ export class TerrainViewer {
     const morph = tr && tr.kind === 'morph' ? tr : null
     if (morph) morph.routeLines = [] // 再構築するので古い参照を捨てる
     this.routeLabels = [] // 距離/勾配ラベルも作り直す（古いスプライトは routeGroup と一緒に破棄済み）
+    this.routeLineObjs = [] // クリック判定の対象も作り直す
     if (!g || this.routes.length === 0) return
 
     const lift = 8 * g.k // 地表から数メートル浮かせて Z ファイト／めり込みを避ける
@@ -1008,11 +1018,20 @@ export class TerrainViewer {
       rail: [],
       aerialway: []
     }
+    // 線分の並び順と同じ順で、その線分がどのルート由来かを控える（クリック判定の逆引き用）。
+    const idsByCat: Record<RouteCategory, string[]> = {
+      road: [],
+      foot: [],
+      trail: [],
+      rail: [],
+      aerialway: []
+    }
 
     for (const r of this.routes) {
       if (r.visible === false || r.coords.length < 2) continue
       const nf = newByCat[r.category]
       const of = oldByCat[r.category]
+      const idf = idsByCat[r.category]
       // 各頂点のワールド座標（新地形）と、morph 用の旧地形対応点を先に計算しておく。
       const px: number[] = []
       const py: number[] = []
@@ -1038,6 +1057,7 @@ export class TerrainViewer {
       for (let i = 0; i < px.length - 1; i++) {
         nf.push(px[i], py[i], pz[i], px[i + 1], py[i + 1], pz[i + 1])
         if (morph) of.push(ox[i], oy[i], oz[i], ox[i + 1], oy[i + 1], oz[i + 1])
+        idf.push(r.id)
       }
 
       // カーブ単位の距離/勾配ラベルは表示ONのときだけ作る（OFF なら計算もテクスチャ生成も省く）。
@@ -1062,8 +1082,10 @@ export class TerrainViewer {
       )
       seg.renderOrder = 9 // 地点（10〜12）より背面
       seg.userData.routeCategory = cat
+      seg.userData.routeIds = idsByCat[cat] // 線分 index → ルート id（クリック判定用）
       seg.visible = this.routeCatVisible[cat] // 種別フィルタを反映
       group.add(seg)
+      this.routeLineObjs.push(seg)
 
       if (wipe && wipe.newPlane) {
         // 新地形側のクリップ平面を共有し、地形と同じ seam でワイプさせる。
@@ -1191,6 +1213,43 @@ export class TerrainViewer {
   /** 地点をドラッグ移動して確定したときのコールバックを登録する */
   setLandmarkMoveHandler(cb: (id: string, lng: number, lat: number) => void) {
     this.onMoveLandmark = cb
+  }
+
+  /** 3Dでルート線をクリックしたときに呼ばれるコールバックを登録する */
+  setRouteClickHandler(cb: (routeId: string) => void) {
+    this.onPickRoute = cb
+  }
+
+  /**
+   * マウス位置直下のルート線を拾って、その元になったルートの id を返す（無ければ null）。
+   * 線のヒット判定幅はワールド単位なので、画面上でおよそ一定の太さになるよう距離で換算する。
+   */
+  private pickRouteId(e: PointerEvent): string | null {
+    if (!this.routeGroup?.visible || this.routeLineObjs.length === 0) return null
+    const targets = this.routeLineObjs.filter((o) => o.visible)
+    if (targets.length === 0) return null
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    const ndc = new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1
+    )
+    this.raycaster.setFromCamera(ndc, this.camera)
+
+    // 画面上で約8pxぶんの当たり幅にする（既定の 1 ワールド単位＝5km では広すぎる）。
+    const h = this.container.clientHeight || 1
+    const fovR = (this.camera.fov * Math.PI) / 180
+    const dist = this.camera.position.distanceTo(this.controls.target)
+    const pxPerWorld = h / (2 * Math.tan(fovR / 2) * Math.max(dist, 1e-3))
+    const prev = this.raycaster.params.Line.threshold
+    this.raycaster.params.Line.threshold = 8 / pxPerWorld
+    const hit = this.raycaster.intersectObjects(targets, false)[0]
+    this.raycaster.params.Line.threshold = prev
+    if (!hit) return null
+
+    // LineSegments のレイキャストは線分の先頭頂点 index を返すので、2頂点=1線分で割り戻す。
+    const ids = hit.object.userData.routeIds as string[] | undefined
+    if (!ids) return null
+    return ids[Math.floor((hit.index ?? 0) / 2)] ?? null
   }
 
   /** マウス位置直下にある地点マーカーの id を返す（無ければ null） */

@@ -1326,6 +1326,7 @@ function showTab(which: 'map' | '2d' | '3d') {
     if (!viewer) {
       viewer = new TerrainViewer($('viewer3d'))
       viewer.setLandmarkMoveHandler(onMoveLandmark)
+      viewer.setRouteClickHandler(onPickRouteIn3D)
       viewer.setTerrainVisible(chkShowTerrain.checked)
       viewer.setGridVisible(chkShowGrid.checked)
       viewer.setContoursVisible(chkShowContours.checked)
@@ -1947,6 +1948,9 @@ function renderRoutePanel() {
   for (const r of routes) {
     const li = document.createElement('li')
     li.className = 'lm-item'
+    li.dataset.id = r.id
+    // 3Dで選ばれたルートは、一覧を作り直しても選択表示が残るようにする
+    if (r.id === pickedRouteId) li.classList.add('picked')
     const top = document.createElement('div')
     top.className = 'lm-top'
 
@@ -1990,6 +1994,23 @@ function renderRoutePanel() {
     li.append(top)
     routeList.appendChild(li)
   }
+}
+
+// 3Dビューでクリックして選択中のルート（一覧の該当行を強調する）
+let pickedRouteId: string | null = null
+
+/**
+ * 3Dでルート線をクリックしたとき：ロケーションの詳細＞ルートタブを開き、
+ * 一覧の該当行までスクロールして強調する。
+ */
+function onPickRouteIn3D(routeId: string) {
+  if (!routes.some((r) => r.id === routeId)) return
+  pickedRouteId = routeId
+  if (!detailMode) showWorkspaceDetail(true)
+  showWsSubtab('routes')
+  renderRoutePanel() // 強調表示を反映（.picked の付け替え）
+  const li = routeList.querySelector<HTMLLIElement>(`li[data-id="${CSS.escape(routeId)}"]`)
+  li?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
 }
 
 // ---- 経路探索（取り込んだルート網の上でスタート→ゴールを結ぶ） ----
@@ -2176,6 +2197,7 @@ for (const el of [chkSearchRoad, chkSearchFoot, chkSearchTrail, chkSearchRail, c
 function loadRoutes(ws: Workspace) {
   routes = ws.routes ?? []
   osmCandidates = []
+  pickedRouteId = null // ロケーションが変わったら3Dでの選択も解除する
   btnSaveRoutes.hidden = true
   routeStatus.textContent = ''
   drawRouteLayers()
@@ -2187,6 +2209,7 @@ function loadRoutes(ws: Workspace) {
 function clearRoutes() {
   routes = []
   osmCandidates = []
+  pickedRouteId = null
   btnSaveRoutes.hidden = true
   routeStatus.textContent = ''
   drawRouteLayers()
