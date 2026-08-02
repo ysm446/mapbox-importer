@@ -1522,8 +1522,9 @@ function isInsideBbox(lm: Landmark, bbox: HeightmapMeta['bbox']): boolean {
 }
 
 function countOutsideLandmarks(): number {
-  if (!selectedBbox) return 0
-  return landmarks.filter((lm) => !isInsideBbox(lm, selectedBbox)).length
+  const bbox = selectedBbox
+  if (!bbox) return 0
+  return landmarks.filter((lm) => !isInsideBbox(lm, bbox)).length
 }
 
 function setPlaceMode(on: boolean) {
