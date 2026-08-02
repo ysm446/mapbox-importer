@@ -5,10 +5,16 @@
 ## プロジェクト概要
 Mapbox の Terrain タイルからハイトマップを生成・プレビューする、ローカル完結の
 スタンドアロン・デスクトップアプリ（Electron + TypeScript）。
+詳細な目的・要件は [docs/plan/goals.md](docs/plan/goals.md) を参照。
 
-## ⚠️ 作業ごとに docs/changelog.md を更新する（最重要ルール）
-**まとまった作業（機能追加・修正・方針変更など）が終わるたびに、必ず
-[docs/changelog.md](docs/changelog.md) へその日の作業内容を新しい順（上）に追記すること。** 更新を忘れない。
+## ⚠️ 作業ごとに docs/ を更新する（最重要ルール）
+**まとまった作業（機能追加・修正・方針変更など）が終わるたびに、必ず `docs/` 内の
+該当ファイルを更新すること。** 更新を忘れない。
+
+- [docs/plan/goals.md](docs/plan/goals.md) … 目的・要件・確定方針。**要件や方針が変わったときだけ**更新。
+- [docs/plan/plan.md](docs/plan/plan.md) … これからやること（ロードマップ）。着手・完了で項目を移動する。
+- [docs/plan/progress.md](docs/plan/progress.md) … 現在の状態・完了/未完了チェックリスト。**毎回**「最終更新」日付を更新。
+- [docs/changelog.md](docs/changelog.md) … 変更履歴。**毎回**、その日の作業内容を新しい順（上）に追記。
 
 日付は実際の当日の日付（YYYY-MM-DD）を使う。相対表現（「今日」等）は使わない。
 
@@ -35,7 +41,7 @@ src/
    ├─ main.ts        地図・範囲選択・生成・タブ・ライブラリ
    ├─ viewer3d.ts    Three.js 3D 地形ビューワ
    └─ i18n.ts        UI文言（ja / en）
-docs/           changelog（作業ごとに更新）
+docs/           changelog.md ＋ plan/（goals / plan / progress）。作業ごとに更新
 data/           生成物の既定保存先（git 管理外。ルートフォルダは切替可能）
 ```
 

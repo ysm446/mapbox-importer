@@ -3,7 +3,7 @@
 形式: 新しいものを上に。日付は YYYY-MM-DD。
 
 ## 2026-08-02
-- docs：CLAUDE.md を実態に合わせて修正。存在しない `docs/goals.md` / `plan.md` / `progress.md` への参照を削除し、docs 更新ルールを `docs/changelog.md` のみに変更。ディレクトリ構成に `osm.ts` / `zip.ts` / `shared/mercator.ts` / `i18n.ts` を追記し、保存先の記述をルートフォルダ切替とフォルダ構成（`<id>/heightmap.u16` ほか）に更新。
+- docs：CLAUDE.md を実態に合わせて修正。docs 参照パスを実際の配置（`docs/plan/goals.md` / `docs/plan/plan.md` / `docs/plan/progress.md`）へ直し、ディレクトリ構成に `osm.ts` / `zip.ts` / `shared/mercator.ts` / `i18n.ts` を追記。保存先の記述をルートフォルダ切替とフォルダ構成（`<id>/heightmap.u16` ほか）に更新（いったん「changelog のみ」に書き換えたのは docs/plan/ の見落としで、4ファイル運用ルールへ復元済み）。
 - レビュー修正（renderer/main.ts）：ロケーション選択まわりの競合を解消。①`selectItem` にリクエスト連番ガードを入れ、連続クリック時に古い応答が新しい選択を上書きしないようにした。②`onPlaceLandmark` / `onMoveLandmark` / `fetchOsm` は `await` 中に選択ロケーションが変わった場合に結果を破棄し、別ロケーションへの誤保存（データ混入）を防ぐ。③`enterWorkspace` は読み込み失敗時に詳細モードへ入らないようにした。
 - レビュー修正（renderer/main.ts）：OSMルート取り込みで、クリップにより同一 way が複数セグメントに分かれた際にルート `id` が重複し、1本削除すると全セグメントが消える問題を修正（採用順の連番を付与）。
 - レビュー修正（renderer/main.ts）：等高線グラデーションの Delete/Backspace キー処理が、エディタ非表示時にも発火してキーポイントを黙って削除・保存していた問題を修正（エディタが表示中のときだけ反応）。
