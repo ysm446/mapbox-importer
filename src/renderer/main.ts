@@ -486,6 +486,8 @@ btnContourGradientReset.addEventListener('click', () => {
 document.addEventListener('keydown', (ev) => {
   if (contourColorMode !== 'gradient') return
   if (ev.key !== 'Delete' && ev.key !== 'Backspace') return
+  // グラデーションエディタが実際に表示されているときだけ反応する（他画面での誤削除防止）
+  if (contourGradientEditor.offsetParent === null) return
   const target = ev.target as HTMLElement | null
   const tag = target?.tagName
   if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return
@@ -572,6 +574,7 @@ async function saveCurrentScreenshot() {
   try {
     const res = await api.saveScreenshot()
     if (res.saved && res.filePath) progress.textContent = t('screenshot.saved') + res.filePath
+    else resetStatus() // キャンセル等で保存されなかった → 「保存中…」を残さない
   } catch (err) {
     resetStatus()
     alert(t('screenshot.failed') + (err as Error).message)
@@ -969,8 +972,36 @@ map.on('mousedown', (e) => {
   drawStart = e.lngLat
 })
 
+/** 矩形描画を確定して通常モードへ戻す（mouseup / ウィンドウ外リリース検知の共通処理） */
+function finishDraw(p: maplibregl.LngLat) {
+  if (!drawStart) return
+  const w = Math.min(drawStart.lng, p.lng)
+  const east = Math.max(drawStart.lng, p.lng)
+  const s = Math.min(drawStart.lat, p.lat)
+  const n = Math.max(drawStart.lat, p.lat)
+  // クリックだけ（ドラッグなし）の誤操作を無視
+  if (Math.abs(east - w) > 1e-5 && Math.abs(n - s) > 1e-5) {
+    if (snapPow2) {
+      // 描き始めの角を固定してスナップ
+      const ax = drawStart.lng <= p.lng ? 'w' : 'e'
+      const ay = drawStart.lat >= p.lat ? 'n' : 's'
+      const z = parseInt(zoomInput.value)
+      const sp = snapToPow2(w, s, east, n, z, ax, ay)
+      setBBoxFields(sp.west, sp.south, sp.east, sp.north)
+    } else {
+      setBBoxFields(w, s, east, n)
+    }
+  }
+  setDrawMode(false) // 1回描いたら通常モードに戻す
+}
+
 map.on('mousemove', (e) => {
   if (!drawMode || !drawStart) return
+  // ウィンドウ外でボタンが離された（mouseup を取り逃した）→ その場で確定
+  if (e.originalEvent.buttons === 0) {
+    finishDraw(e.lngLat)
+    return
+  }
   const w = Math.min(drawStart.lng, e.lngLat.lng)
   const east = Math.max(drawStart.lng, e.lngLat.lng)
   const s = Math.min(drawStart.lat, e.lngLat.lat)
@@ -980,24 +1011,7 @@ map.on('mousemove', (e) => {
 
 map.on('mouseup', (e) => {
   if (!drawMode || !drawStart) return
-  const w = Math.min(drawStart.lng, e.lngLat.lng)
-  const east = Math.max(drawStart.lng, e.lngLat.lng)
-  const s = Math.min(drawStart.lat, e.lngLat.lat)
-  const n = Math.max(drawStart.lat, e.lngLat.lat)
-  // クリックだけ（ドラッグなし）の誤操作を無視
-  if (Math.abs(east - w) > 1e-5 && Math.abs(n - s) > 1e-5) {
-    if (snapPow2) {
-      // 描き始めの角を固定してスナップ
-      const ax = drawStart.lng <= e.lngLat.lng ? 'w' : 'e'
-      const ay = drawStart.lat >= e.lngLat.lat ? 'n' : 's'
-      const z = parseInt(zoomInput.value)
-      const sp = snapToPow2(w, s, east, n, z, ax, ay)
-      setBBoxFields(sp.west, sp.south, sp.east, sp.north)
-    } else {
-      setBBoxFields(w, s, east, n)
-    }
-  }
-  setDrawMode(false) // 1回描いたら通常モードに戻す
+  finishDraw(e.lngLat)
 })
 
 // ---- 四隅ハンドルをドラッグして矩形をリサイズ ----
@@ -1027,8 +1041,30 @@ map.on('mousedown', 'bbox-handles', (e) => {
   e.preventDefault()
 })
 
+/** 角ドラッグを終了（スナップ＋状態リセット）。ウィンドウ外リリースでも呼ぶ */
+function endCornerDrag() {
+  if (!dragCorner) return
+  // 離した時にスナップ（動かした角の反対側を固定）
+  if (snapPow2) {
+    const b = currentBBox()
+    const ax = dragCorner.includes('w') ? 'e' : 'w'
+    const ay = dragCorner.includes('n') ? 's' : 'n'
+    const z = parseInt(zoomInput.value)
+    const sp = snapToPow2(b.west, b.south, b.east, b.north, z, ax, ay)
+    setBBoxFields(sp.west, sp.south, sp.east, sp.north)
+  }
+  dragCorner = null
+  map.dragPan.enable()
+  map.getCanvas().style.cursor = ''
+}
+
 map.on('mousemove', (e) => {
   if (!dragCorner) return
+  // ウィンドウ外でボタンが離された（mouseup を取り逃した）→ ドラッグ終了
+  if (e.originalEvent.buttons === 0) {
+    endCornerDrag()
+    return
+  }
   map.getCanvas().style.cursor = cornerCursor(dragCorner) // ドラッグ中も斜め矢印を維持
   const b = currentBBox()
   // ドラッグ中の角の経度・緯度を更新（反対側の角は固定）
@@ -1046,21 +1082,7 @@ map.on('mousemove', (e) => {
   )
 })
 
-map.on('mouseup', () => {
-  if (!dragCorner) return
-  // 離した時にスナップ（動かした角の反対側を固定）
-  if (snapPow2) {
-    const b = currentBBox()
-    const ax = dragCorner.includes('w') ? 'e' : 'w'
-    const ay = dragCorner.includes('n') ? 's' : 'n'
-    const z = parseInt(zoomInput.value)
-    const sp = snapToPow2(b.west, b.south, b.east, b.north, z, ax, ay)
-    setBBoxFields(sp.west, sp.south, sp.east, sp.north)
-  }
-  dragCorner = null
-  map.dragPan.enable()
-  map.getCanvas().style.cursor = ''
-})
+map.on('mouseup', endCornerDrag)
 
 // ---- 矩形本体（塗り）を左ドラッグして全体移動 ----
 // サイズは変えずに平行移動するので、2のべき乗サイズも保たれる。
@@ -1084,16 +1106,8 @@ map.on('mousedown', 'bbox-fill', (e) => {
   e.preventDefault()
 })
 
-map.on('mousemove', (e) => {
-  if (!movingBox || !moveLast) return
-  const dLng = e.lngLat.lng - moveLast.lng
-  const dLat = e.lngLat.lat - moveLast.lat
-  const b = currentBBox()
-  setBBoxFields(b.west + dLng, b.south + dLat, b.east + dLng, b.north + dLat)
-  moveLast = e.lngLat
-})
-
-map.on('mouseup', () => {
+/** 矩形の平行移動を終了（スナップ＋状態リセット）。ウィンドウ外リリースでも呼ぶ */
+function endBoxMove() {
   if (!movingBox) return
   // 2のべき乗モード時は、離した位置でタイル境界へ吸着（サイズは維持）
   if (snapPow2) {
@@ -1106,7 +1120,23 @@ map.on('mouseup', () => {
   moveLast = null
   map.dragPan.enable()
   map.getCanvas().style.cursor = ''
+}
+
+map.on('mousemove', (e) => {
+  if (!movingBox || !moveLast) return
+  // ウィンドウ外でボタンが離された（mouseup を取り逃した）→ 移動終了
+  if (e.originalEvent.buttons === 0) {
+    endBoxMove()
+    return
+  }
+  const dLng = e.lngLat.lng - moveLast.lng
+  const dLat = e.lngLat.lat - moveLast.lat
+  const b = currentBBox()
+  setBBoxFields(b.west + dLng, b.south + dLat, b.east + dLng, b.north + dLat)
+  moveLast = e.lngLat
 })
+
+map.on('mouseup', endBoxMove)
 
 for (const el of [westI, eastI, southI, northI]) {
   el.addEventListener('change', () => {
@@ -1464,8 +1494,8 @@ function showPreview(
 
 /** ワークスペースの中（詳細モード）へ入る。未選択なら先に読み込む */
 async function enterWorkspace(id: string) {
-  if (selectedId !== id) await selectItem(id)
-  showWorkspaceDetail(true)
+  if (selectedId !== id && !(await selectItem(id))) return // 読み込み失敗・選択変更時は入らない
+  if (selectedId === id) showWorkspaceDetail(true)
 }
 
 /** 3Dビューポート左上に 縦横(km) / 高さ(標高差) / px を表示する */
@@ -1495,7 +1525,12 @@ function clearAnnotations() {
 }
 
 async function saveLandmarks() {
-  if (selectedId) await api.saveLandmarks(selectedId, landmarks)
+  if (!selectedId) return
+  try {
+    await api.saveLandmarks(selectedId, landmarks)
+  } catch (err) {
+    alert(t('load.failed') + (err as Error).message)
+  }
 }
 
 async function refreshLandmarkLibraryStatus() {
@@ -1538,7 +1573,9 @@ function setPlaceMode(on: boolean) {
 /** 3Dクリックで地点が打たれたとき：標高をサンプリングして追加・保存 */
 async function onPlaceLandmark(lng: number, lat: number) {
   if (!selectedId) return
-  const ele = (await api.sampleElevation(selectedId, lng, lat)) ?? 0
+  const id = selectedId
+  const ele = (await api.sampleElevation(id, lng, lat)) ?? 0
+  if (selectedId !== id) return // サンプリング中に選択が変わった → 別ロケーションへ保存しない
   landmarks.push({
     id: `lm_${Date.now().toString(36)}`,
     name: `${t('landmark.defaultName')} ${landmarks.length + 1}`,
@@ -1594,11 +1631,13 @@ btnRemoveOutsideLandmarks.addEventListener('click', async () => {
 /** 3Dで地点をドラッグ移動して確定したとき：標高を取り直して保存 */
 async function onMoveLandmark(id: string, lng: number, lat: number) {
   if (!selectedId) return
+  const wsId = selectedId
   const lm = landmarks.find((x) => x.id === id)
   if (!lm) return
   lm.lng = lng
   lm.lat = lat
-  const ele = await api.sampleElevation(selectedId, lng, lat)
+  const ele = await api.sampleElevation(wsId, lng, lat)
+  if (selectedId !== wsId) return // サンプリング中に選択が変わった → 別ロケーションへ保存しない
   if (ele != null) lm.elevation = ele
   await saveLandmarks()
   viewer?.setLandmarks(landmarks)
@@ -1813,10 +1852,12 @@ async function fetchOsm() {
   if (cats.length === 0) return
   const bbox = currentBBox()
   if (![bbox.west, bbox.south, bbox.east, bbox.north].every((v) => !isNaN(v))) return
+  const wsId = selectedId
   btnFetchOsm.disabled = true
   routeStatus.textContent = t('route.fetching')
   try {
     const feats = await api.fetchOsmRoutes(bbox, cats, chkRouteClip.checked)
+    if (selectedId !== wsId) return // 取得中に選択が変わった → 別ロケーションへ反映しない
     // 既に保存済みの way は候補から除外（重複防止）
     const have = new Set(routes.map((r) => r.osmId).filter((v): v is number => v != null))
     osmCandidates = feats.filter((f) => !have.has(f.osmId)).map((f) => ({ ...f, adopted: true }))
@@ -1835,16 +1876,17 @@ async function fetchOsm() {
 /** 採用中（adopted）の候補を routes へ確定し保存する */
 async function saveAdoptedRoutes() {
   if (!selectedId) return
-  for (const c of osmCandidates.filter((x) => x.adopted)) {
+  // 同じ way がクリップで複数セグメントに分かれても id が重複しないよう連番を付ける
+  osmCandidates.filter((x) => x.adopted).forEach((c, i) => {
     routes.push({
-      id: `rt_${Date.now().toString(36)}_${c.osmId}`,
+      id: `rt_${Date.now().toString(36)}_${c.osmId}_${i}`,
       name: c.name || routeCatLabel(c.category),
       category: c.category,
       osmId: c.osmId,
       coords: c.coords,
       visible: true
     })
-  }
+  })
   osmCandidates = []
   btnSaveRoutes.hidden = true
   routeStatus.textContent = ''
@@ -2221,6 +2263,8 @@ async function refreshLibrary() {
     // プレビューPNGを非同期で読み込んでサムネ表示
     api.getThumb(e.id).then((url) => {
       if (url) thumb.src = url
+    }).catch(() => {
+      /* サムネ読み込み失敗は空表示のままにする */
     })
 
     const meta = document.createElement('div')
@@ -2293,7 +2337,12 @@ async function refreshLibrary() {
     del.addEventListener('click', async (ev) => {
       ev.stopPropagation()
       if (!confirm(`「${e.name}」${t('lib.deleteConfirm')}`)) return
-      await api.deleteWorkspace(e.id)
+      try {
+        await api.deleteWorkspace(e.id)
+      } catch (err) {
+        alert(t('lib.delete') + ': ' + (err as Error).message)
+        return
+      }
       if (selectedId === e.id) {
         selectedId = null
         selectedInfo.textContent = t('selected.none')
@@ -2334,7 +2383,9 @@ async function refreshLibrary() {
       const ids = (Array.from(libList.children) as HTMLElement[])
         .map((c) => c.dataset.id)
         .filter((id): id is string => !!id)
-      await api.reorderWorkspaces(ids)
+      await api.reorderWorkspaces(ids).catch(() => {
+        /* 並び順の保存失敗は次回一覧取得時の順序で復元される */
+      })
     })
 
     // 「中に入る」ボタン（詳細＝地点リストへドリルイン）
@@ -2357,10 +2408,15 @@ async function refreshLibrary() {
   markSelected()
 }
 
-async function selectItem(id: string) {
+// 連続クリック時に古い応答が新しい選択を上書きしないよう、最後の要求だけを反映する
+let selectSeq = 0
+
+async function selectItem(id: string): Promise<boolean> {
+  const seq = ++selectSeq
   progress.textContent = t('load.loading')
   try {
     const item = await api.getWorkspace(id)
+    if (seq !== selectSeq) return false // より新しい選択が進行中 → この応答は破棄
     showPreview(item.previewDataUrl, item.satelliteDataUrl, item.mesh, item.workspace)
 
     // 選択ワークスペースの範囲へ地図を移動し、bbox を反映
@@ -2382,9 +2438,12 @@ async function selectItem(id: string) {
     )
 
     resetStatus()
+    return true
   } catch (err) {
+    if (seq !== selectSeq) return false
     resetStatus()
     alert(t('load.failed') + (err as Error).message)
+    return false
   }
 }
 
@@ -2392,8 +2451,12 @@ async function selectItem(id: string) {
 btnExportTexture.addEventListener('click', async () => {
   if (!selectedId) return
   const format = exportTextureFormat.value === 'raw16' ? 'raw16' : 'png16'
-  const r = await api.exportItem(selectedId, format)
-  if (r.saved) progress.textContent = t('export.saved') + r.filePath
+  try {
+    const r = await api.exportItem(selectedId, format)
+    if (r.saved) progress.textContent = t('export.saved') + r.filePath
+  } catch (err) {
+    alert(t('export.saved') + (err as Error).message)
+  }
 })
 btnExportZip.addEventListener('click', async () => {
   if (!selectedId) return

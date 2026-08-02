@@ -294,6 +294,11 @@ export class TerrainViewer {
         const next = e.deltaY < 0 ? base * step : base / step
         // 注視点に貫通しない最小距離だけ確保（上限は設けない）。
         this.zoomTarget = Math.max(0.01, next)
+        // 引きすぎてもファークリップで地形が消えないよう、必要に応じて描画距離を広げる
+        if (this.camera.far < this.zoomTarget * 2) {
+          this.camera.far = this.zoomTarget * 4
+          this.camera.updateProjectionMatrix()
+        }
       },
       { passive: false }
     )
@@ -735,8 +740,10 @@ export class TerrainViewer {
       if (tr.newPlane) tr.newPlane.constant = seam // 新: x<=seam
       // ラベル（スプライト）はクリップ非対応なので、境界が x を通過したら表示を切り替える
       // （マーカー・線はクリップで同期して出る/消えるので、地点一式が境界と同時に出現/消滅）。
-      for (const sp of tr.oldSprites) sp.visible = sp.position.x >= seam
-      for (const sp of tr.newSprites) sp.visible = sp.position.x <= seam
+      // グリッド系（軸kmラベル）はグリッド非表示設定を優先する。
+      const gridOk = (sp: LabelObject) => !sp.userData?.isGridObject || this.gridVisible
+      for (const sp of tr.oldSprites) sp.visible = gridOk(sp) && sp.position.x >= seam
+      for (const sp of tr.newSprites) sp.visible = gridOk(sp) && sp.position.x <= seam
     }
     if (t >= 1) this.finishTransition()
   }
@@ -790,7 +797,8 @@ export class TerrainViewer {
       if (this.landmarkGroup) this.landmarkGroup.visible = this.landmarksVisible
     } else {
       // slide / wipe：旧グループ・旧テクスチャを破棄、新を正位置・クリップ解除・表示復帰。
-      this.disposeGroup(tr.oldGroup)
+      // 現用の衛星テクスチャ（新メッシュも参照）は破棄しない。
+      this.disposeGroup(tr.oldGroup, [this.satelliteTex])
       tr.oldTex?.dispose()
       tr.newGroup.position.set(0, 0, 0)
       for (const m of tr.newMats) {
@@ -798,7 +806,8 @@ export class TerrainViewer {
         m.needsUpdate = true
       }
       for (const sp of tr.newSprites) {
-        sp.visible = true // wipe で隠していた分を表示に戻す
+        // グリッド系（軸kmラベル）はグリッド表示設定を維持し、それ以外を表示に戻す
+        sp.visible = sp.userData?.isGridObject ? this.gridVisible : true
         sp.material.opacity = 1 // slide で下げた不透明度を戻す
       }
     }
@@ -815,8 +824,11 @@ export class TerrainViewer {
     }
   }
 
-  /** 地形グループをシーンから外して破棄（衛星テクスチャ=mesh.map は別管理なので触らない）。 */
-  private disposeGroup(g: THREE.Group) {
+  /**
+   * 地形グループをシーンから外して破棄。
+   * keepMaps に渡したテクスチャ（別管理の衛星テクスチャ等）は mesh.map でも破棄しない。
+   */
+  private disposeGroup(g: THREE.Group, keepMaps: (THREE.Texture | null)[] = []) {
     this.scene.remove(g)
     g.traverse((o) => {
       if ((o as THREE.Sprite).isSprite) {
@@ -827,7 +839,7 @@ export class TerrainViewer {
         const any = o as THREE.Mesh & THREE.Line
         any.geometry?.dispose()
         const mat = any.material as THREE.Material & { map?: THREE.Texture }
-        mat.map?.dispose()
+        if (mat.map && !keepMaps.includes(mat.map)) mat.map.dispose()
         mat?.dispose()
       }
     })
@@ -884,7 +896,8 @@ export class TerrainViewer {
   setRouteDistanceMode(mode: 'horizontal' | 'surface') {
     if (this.routeDistanceMode === mode) return
     this.routeDistanceMode = mode
-    if (this.routeLabelsVisible && this.routes.length > 0) this.renderRoutes()
+    // ラベル非表示中も描き直して旧モードのラベルを捨てる（再表示時に新モードで作り直させる）
+    if (this.routes.length > 0) this.renderRoutes()
   }
 
   /** 種別（道路/歩道/鉄道）ごとに表示/非表示を切り替える */
@@ -1466,7 +1479,9 @@ export class TerrainViewer {
     // 新地点データがあれば renderLandmarks より前に反映（演出のフェード対象に含めるため）。
     if (landmarks) this.landmarks = landmarks
     if (oldGroup && !keepOld) {
-      this.disposeGroup(oldGroup)
+      // 現用の衛星テクスチャ（同一ペイロード再構築時は旧メッシュも参照している）と、
+      // morph のクロスフェードに使う旧テクスチャは破棄しない。
+      this.disposeGroup(oldGroup, isMorph ? [this.satelliteTex, oldTex] : [this.satelliteTex])
       if (!isMorph) oldTex?.dispose() // morph は旧テクスチャをクロスフェードに使うので保持（完了時に破棄）
     }
     // 新しいプレゼンテーションをまとめるグループ。
@@ -2113,6 +2128,9 @@ export class TerrainViewer {
     this.routes = []
     this.routeGroup = null // 地形グループと一緒に破棄済み
     this.renderer.dispose()
+    // コンテナに残した DOM（キャンバス・デバッグ表示）も取り除く（再生成時の重なり防止）
+    this.renderer.domElement.remove()
+    this.debugEl?.remove()
   }
 }
 
@@ -2220,10 +2238,11 @@ function niceStep(x: number): number {
   return nice * base
 }
 
-/** 高さグリッド h(cols×rows, row-major) を (u,v)∈[0,1] でバイリニア補間する（モーフのリサンプル用）。 */
+/** 高さグリッド h(cols×rows, row-major) を (u,v)∈[0,1] でバイリニア補間する（モーフのリサンプル用）。
+ * 範囲外の u/v は端にクランプする（クリップしていないルート等が bbox 外に出るため）。 */
 function bilinearSample(h: ArrayLike<number>, cols: number, rows: number, u: number, v: number): number {
-  const x = u * (cols - 1)
-  const y = v * (rows - 1)
+  const x = Math.min(cols - 1, Math.max(0, u * (cols - 1)))
+  const y = Math.min(rows - 1, Math.max(0, v * (rows - 1)))
   const x0 = Math.floor(x)
   const y0 = Math.floor(y)
   const x1 = Math.min(cols - 1, x0 + 1)

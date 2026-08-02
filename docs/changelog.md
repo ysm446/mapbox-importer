@@ -3,6 +3,16 @@
 形式: 新しいものを上に。日付は YYYY-MM-DD。
 
 ## 2026-08-02
+- docs：CLAUDE.md を実態に合わせて修正。存在しない `docs/goals.md` / `plan.md` / `progress.md` への参照を削除し、docs 更新ルールを `docs/changelog.md` のみに変更。ディレクトリ構成に `osm.ts` / `zip.ts` / `shared/mercator.ts` / `i18n.ts` を追記し、保存先の記述をルートフォルダ切替とフォルダ構成（`<id>/heightmap.u16` ほか）に更新。
+- レビュー修正（renderer/main.ts）：ロケーション選択まわりの競合を解消。①`selectItem` にリクエスト連番ガードを入れ、連続クリック時に古い応答が新しい選択を上書きしないようにした。②`onPlaceLandmark` / `onMoveLandmark` / `fetchOsm` は `await` 中に選択ロケーションが変わった場合に結果を破棄し、別ロケーションへの誤保存（データ混入）を防ぐ。③`enterWorkspace` は読み込み失敗時に詳細モードへ入らないようにした。
+- レビュー修正（renderer/main.ts）：OSMルート取り込みで、クリップにより同一 way が複数セグメントに分かれた際にルート `id` が重複し、1本削除すると全セグメントが消える問題を修正（採用順の連番を付与）。
+- レビュー修正（renderer/main.ts）：等高線グラデーションの Delete/Backspace キー処理が、エディタ非表示時にも発火してキーポイントを黙って削除・保存していた問題を修正（エディタが表示中のときだけ反応）。
+- レビュー修正（renderer/main.ts）：bbox の描画・角リサイズ・平行移動ドラッグ中にウィンドウ外でマウスを離すと、ドラッグ状態と `dragPan` 無効化が残る問題を修正（`buttons === 0` 検知で終了処理を実行。終了処理は `finishDraw` / `endCornerDrag` / `endBoxMove` に共通化）。
+- レビュー修正（renderer/main.ts）：未捕捉の Promise 拒否を解消（サムネ読込・ロケーション削除・並べ替え保存・テクスチャ書き出し・ランドマーク保存にエラー処理を追加）。F12スクリーンショットがキャンセルされた際にステータスバーが「保存中…」のまま残る問題も修正。
+- レビュー修正（renderer/viewer3d.ts）：`disposeGroup` が使用中の衛星テクスチャ（`satelliteTex`）や morph クロスフェード用の旧テクスチャまで破棄していた問題を修正（`keepMaps` 引数で除外。設定切替のたびに大きな衛星テクスチャがGPUへ再アップロードされるヒッチを防ぐ）。
+- レビュー修正（renderer/viewer3d.ts）：slide/wipe トランジション完了時（および wipe 進行中）に、グリッド非表示設定でも軸kmラベルが表示されてしまう問題を修正（`isGridObject` は `gridVisible` を優先）。
+- レビュー修正（renderer/viewer3d.ts）：`bilinearSample` の u/v を端へクランプし、クリップしていないルートや bbox 外ランドマークが morph 中に NaN 座標（ルート消失・マーカー飛び）になる問題を修正。ルートラベル非表示中に距離モードを切り替えると再表示時に旧モードの距離が残る問題、ホイールで大きく引いたときにファークリップで地形が消える問題、`dispose()` がキャンバス・デバッグ表示をDOMに残す問題も修正。
+- レビュー修正（main プロセス）：`rangeMin`/`rangeMax` 指定で正規化した場合にメタへ実測 min/max が保存され、再読込時の標高復元がずれる潜在バグを修正（メタには正規化に実際に使った範囲を保存）。`satellite:fetch` にも地形生成と同じ400タイル上限を追加。`package.json` の `@types/three` を `devDependencies` へ移動。`npx tsc --noEmit` / `npm run build` 確認済み。
 - 3D：環境設定「ラベルを画面に対して一定サイズで表示」をルートの距離/勾配ラベルにも適用した。これまで地名ラベルだけが距離に応じたスケール補正を受けており、ONにしてもカーブのラベルはズームで拡縮していた。ルートラベルのスプライトにも設計スケール（`designScale`）を持たせ、補正処理を `applyFixedLabelScale()` に切り出して地名ラベルと共通の基準（画面高×0.022×行数）で計算するようにした。設定項目のラベル文言も「ラベル（地名・距離/勾配）を…」に更新。
 - データ分離：ロケーション群の保存先を「ルートフォルダ」として切り替えられるようにした。現在のルートと最近使ったフォルダは `userData/config.json` の `rootDir` / `recentRoots` に保存し、ライブラリタブ上部の「データフォルダ」ボタンから切替・履歴削除・フォルダ選択ダイアログを操作できる。切替時は選択中ロケーションや3Dビューの状態を引きずらないようウィンドウを読み込み直す。ルートが消えていた場合は既定の `data/` へ自動で戻す。IPC は `root:get` / `root:set` / `root:choose` / `root:forget` を追加。
 - データ分離：環境設定 `settings.json` をルート配下から `userData/` へ移し、ルートを切り替えても言語・地図スタイル・3D表示設定を保つようにした。旧 `data/settings.json` があれば初回起動時に自動移行する。`landmark-library.json` と `screenshot/` はルートごとに持つため、フォルダ単位で完結してコピー／持ち運びできる。

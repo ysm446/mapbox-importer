@@ -333,7 +333,11 @@ async function generateTerrain(
   }
 }
 
-/** TerrainArgs と生成結果から HeightmapMeta を組み立てる */
+/**
+ * TerrainArgs と生成結果から HeightmapMeta を組み立てる。
+ * minEle/maxEle は保存した u16 の正規化に実際に使った範囲を記録する
+ * （rangeMin/rangeMax 指定時にここが実測値だと、再読込時の標高復元がずれるため）。
+ */
 function makeHeightmapMeta(
   args: TerrainArgs,
   r: { width: number; height: number; minEle: number; maxEle: number }
@@ -344,8 +348,8 @@ function makeHeightmapMeta(
     sourceId: args.sourceId,
     width: r.width,
     height: r.height,
-    minEle: r.minEle,
-    maxEle: r.maxEle,
+    minEle: args.rangeMin ?? r.minEle,
+    maxEle: args.rangeMax ?? r.maxEle,
     updatedAt: Date.now()
   }
 }
@@ -438,6 +442,10 @@ app.whenReady().then(() => {
     const cfg = await loadConfig()
     if (!cfg.token) throw new Error('Mapbox アクセストークンが未設定です。')
     const region = computeRegion(args.bbox, args.zoom)
+    const tileCount = (region.tileX1 - region.tileX0 + 1) * (region.tileY1 - region.tileY0 + 1)
+    if (tileCount > 400) {
+      throw new Error(`タイル数が多すぎます (${tileCount})。範囲を狭めるかズームを下げてください。`)
+    }
     const satTiles = await downloadTiles(
       TILE_SOURCES['satellite'],
       region,
