@@ -1081,6 +1081,8 @@ export class TerrainViewer {
     // py は既に地表＋lift。ラベルは線の少し上に置く。
     sp.position.set(ax, ay + 0.03 * this.annotScale, az)
     sp.renderOrder = 11
+    // 画面固定サイズ表示の基準として設計スケールを控える（地名ラベルと同じ扱い）。
+    sp.userData.designScale = sp.scale.clone()
     sp.material.opacity = 0 // declutter のフェードで出す
     sp.visible = false
     this.routeLabels.push({ sprite: sp, category, worldLen: displayLen })
@@ -1758,7 +1760,22 @@ export class TerrainViewer {
     if (this.lastPayload) this.setData(this.lastPayload, false) // 見た目のみ更新（視点維持）
   }
 
-  /** 地名ラベルを画面に対して一定サイズで表示するか（OFF は通常の遠近で拡縮）。 */
+  /**
+   * 画面固定サイズ ON のとき、距離に応じてワールドスケールを補正し、
+   * ラベルが常に同じ画面高（行数ぶん）になるようにする。地名ラベルと
+   * ルートの距離/勾配ラベルで同じ基準を使う。
+   */
+  private applyFixedLabelScale(sprite: THREE.Sprite, pxPerWorld: number, screenH: number) {
+    if (!this.fixedLabelSize) return
+    const ds = sprite.userData.designScale as THREE.Vector3 | undefined
+    if (!ds) return
+    const lines =
+      (sprite.userData.fixedSizeLines as number) || (sprite.userData.lines as number) || 1
+    const worldH = (screenH * 0.022 * lines) / pxPerWorld // 画面高に対する一定比率
+    sprite.scale.copy(ds).multiplyScalar(worldH / ds.y)
+  }
+
+  /** ラベル（地名・距離/勾配）を画面に対して一定サイズで表示するか（OFF は通常の遠近で拡縮）。 */
   setFixedLabelSize(v: boolean) {
     this.fixedLabelSize = v
     if (this.lastPayload) this.setData(this.lastPayload, false) // ラベルを設計サイズで作り直す
@@ -1843,14 +1860,7 @@ export class TerrainViewer {
     for (const { id, o, decBase, placeBase } of entries) {
       const labelDist = cam.distanceTo(decBase)
       const pxPerWorld = h / (2 * Math.tan(fovR / 2) * Math.max(labelDist, 1e-3))
-      // 画面固定サイズ ON：目標pxになるよう距離に応じてワールドスケールを補正（行数ぶんの高さ）。
-      if (this.fixedLabelSize) {
-        const lines = (o.label.userData.fixedSizeLines as number) || (o.label.userData.lines as number) || 1
-        const targetPxH = h * 0.022 * lines // 画面高に対する一定比率
-        const worldH = targetPxH / pxPerWorld
-        const ds = o.label.userData.designScale as THREE.Vector3
-        if (ds) o.label.scale.copy(ds).multiplyScalar(worldH / ds.y)
-      }
+      this.applyFixedLabelScale(o.label, pxPerWorld, h)
       const sw = o.label.scale.x * pxPerWorld
       const sh = o.label.scale.y * pxPerWorld
 
@@ -1936,6 +1946,7 @@ export class TerrainViewer {
           const pxPerWorld = h / (2 * Math.tan(fovR / 2) * Math.max(dist, 1e-3))
           // カーブの画面上の長さが短すぎる（遠い/短い）ものはラベルを出さない（LOD）。
           if (onScreen && worldLen * pxPerWorld >= ROUTE_LABEL_MIN_PX) {
+            this.applyFixedLabelScale(sprite, pxPerWorld, h)
             const sw = sprite.scale.x * pxPerWorld
             const sh = sprite.scale.y * pxPerWorld
             const sx = (v.x * 0.5 + 0.5) * w
