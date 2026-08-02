@@ -146,6 +146,9 @@ const api = {
     ipcRenderer.invoke('landmarkLibrary:importIntoWorkspace', id),
   sampleElevation: (id: string, lng: number, lat: number): Promise<number | null> =>
     ipcRenderer.invoke('workspace:sampleElevation', id, lng, lat),
+  /** 複数地点の標高をまとめて取得（経路の勾配算出用。u16 の読み込みは1回で済む） */
+  sampleElevations: (id: string, points: [number, number][]): Promise<number[] | null> =>
+    ipcRenderer.invoke('workspace:sampleElevations', id, points),
   // ルート（OSM 取り込み）
   saveRoutes: (id: string, routes: Route[]): Promise<boolean> =>
     ipcRenderer.invoke('workspace:saveRoutes', id, routes),

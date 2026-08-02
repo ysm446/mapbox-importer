@@ -35,6 +35,12 @@ const DEFAULT_CONTOUR_GRADIENT_STOPS: ContourGradientStop[] = [
 ]
 const LANDMARK_ELEVATION_LABEL_SCALE = 0.72
 
+// 経路探索：スタート/ゴールのマーカー色と、探索結果の経路の線色。
+// ルート線（緑系）と混ざらないよう、発着は緑/赤、経路は目立つ黄でハイライトする。
+const SEARCH_START_COLOR = 0x3ddc84
+const SEARCH_GOAL_COLOR = 0xff6b6b
+const SEARCH_PATH_COLOR = 0xffd24d
+
 // ルート種別ごとの線色（2D オーバーレイと合わせる）
 // 色相を緑寄り（ティール緑→緑→黄緑）に収めて種別差を控えめにする（2D ROUTE_COLORS と一致）。
 const ROUTE_COLORS_3D: Record<RouteCategory, number> = {
@@ -43,6 +49,15 @@ const ROUTE_COLORS_3D: Record<RouteCategory, number> = {
   trail: 0x9acd32, // 登山道=黄緑（元の色）
   rail: 0x8fb89a, // 鉄道=くすんだ緑（セージ）
   aerialway: 0xd7b85a // ロープウェイ=山中でも見分けやすい落ち着いた黄
+}
+
+/** 経路探索の発着点。どちらの点かは SearchWhich で区別する。 */
+export type SearchWhich = 'start' | 'goal'
+export interface SearchPoint {
+  lng: number
+  lat: number
+  /** 3D に出す短いラベル（「スタート」「ゴール」など。i18n 済みの文字列を渡す） */
+  label: string
 }
 
 /** モーフ演出中にルート折れ線を旧→新へ補間するための頂点バッファ（flat xyz） */
@@ -250,6 +265,19 @@ export class TerrainViewer {
   }
   // 3Dクリックで地点を配置するモード
   private raycaster = new THREE.Raycaster()
+  // 経路探索モード（発着マーカーのドラッグと探索結果の経路表示）
+  private searchMode = false
+  // ルートタブを開いている間だけ true。false の間は発着マーカーを掴めない（誤操作防止）。
+  private searchEditable = true
+  private searchStart: SearchPoint | null = null
+  private searchGoal: SearchPoint | null = null
+  private searchPath: [number, number][] | null = null
+  private searchPathLabel = ''
+  private searchGroup: THREE.Group | null = null
+  private searchObjs = new Map<SearchWhich, { marker: THREE.Mesh; line: THREE.Line; label: THREE.Sprite }>()
+  private searchLabels: THREE.Sprite[] = []
+  private draggingSearch: SearchWhich | null = null
+  private onMoveSearchPoint: ((which: SearchWhich, lng: number, lat: number) => void) | null = null
   private placeMode = false
   private onPlace: ((lng: number, lat: number) => void) | null = null
   // 地点のドラッグ移動
@@ -322,9 +350,22 @@ export class TerrainViewer {
     dom.addEventListener(
       'pointerdown',
       (e) => {
+        if (e.button !== 0) return
+        // 経路探索の発着マーカーを最優先で掴む（地点マーカーと重なっても発着を動かせる）
+        if (this.searchMode && this.searchEditable) {
+          const which = this.searchHitWhich(e)
+          if (which) {
+            e.stopPropagation()
+            e.preventDefault()
+            this.draggingSearch = which
+            this.controls.enabled = false
+            dom.style.cursor = 'grabbing'
+            dom.setPointerCapture(e.pointerId)
+            return
+          }
+        }
         // 編集モード外・配置モード中・非表示時はドラッグ開始しない（誤操作防止）
-        if (e.button !== 0 || this.placeMode || !this.landmarksVisible || !this.landmarksEditable)
-          return
+        if (this.placeMode || !this.landmarksVisible || !this.landmarksEditable) return
         const id = this.markerHitId(e)
         if (!id) return
         // OrbitControls（回転）へ渡さない
@@ -348,6 +389,11 @@ export class TerrainViewer {
     dom.addEventListener('pointermove', (e) => {
       if (Math.hypot(e.clientX - downX, e.clientY - downY) > 4) moved = true
       // ドラッグ中：地形上の位置に追従させる
+      if (this.draggingSearch) {
+        const p = this.terrainHit(e)
+        if (p) this.moveSearchObjects(this.draggingSearch, p)
+        return
+      }
       if (this.draggingId) {
         const p = this.terrainHit(e)
         if (p) this.moveLandmarkObjects(this.draggingId, p)
@@ -355,11 +401,24 @@ export class TerrainViewer {
       }
       // ホバー時のカーソル（配置モードは crosshair のまま）。編集モード時のみ grab を出す。
       if (!this.placeMode) {
-        dom.style.cursor = this.landmarksEditable && this.markerHitId(e) ? 'grab' : ''
+        const overSearch = this.searchMode && this.searchEditable && !!this.searchHitWhich(e)
+        dom.style.cursor =
+          overSearch || (this.landmarksEditable && this.markerHitId(e)) ? 'grab' : ''
       }
     })
     dom.addEventListener('pointerup', (e) => {
       if (e.button !== 0) return
+      // 経路探索の発着マーカーのドラッグ確定（離した地点の lng/lat を通知して再探索させる）
+      if (this.draggingSearch) {
+        const which = this.draggingSearch
+        this.draggingSearch = null
+        this.controls.enabled = true
+        dom.style.cursor = this.searchHitWhich(e) ? 'grab' : ''
+        const p = this.terrainHit(e)
+        const ll = p && this.pointToLngLat(p)
+        if (ll) this.onMoveSearchPoint?.(which, ll.lng, ll.lat)
+        return
+      }
       // 地点ドラッグの確定
       if (this.draggingId) {
         const id = this.draggingId
@@ -1215,6 +1274,208 @@ export class TerrainViewer {
     this.controls.enableRotate = !on
   }
 
+  // ---- 経路探索モード（スタート/ゴールをドラッグして経路を引く） ----
+
+  /**
+   * 経路探索モードの ON/OFF。ON の間は発着マーカーをドラッグでき、離すたびに cb が
+   * 呼ばれる（呼び出し側で再探索して setRouteSearchPath で結果を返す）。
+   */
+  setRouteSearchMode(on: boolean, cb?: (which: SearchWhich, lng: number, lat: number) => void) {
+    this.searchMode = on
+    this.onMoveSearchPoint = on ? cb ?? null : null
+    if (!on) {
+      this.searchStart = null
+      this.searchGoal = null
+      this.searchPath = null
+      this.searchPathLabel = ''
+    }
+    this.renderRouteSearch()
+  }
+
+  /**
+   * 発着マーカーを掴めるかどうか（ルートタブを開いている間だけ true にする）。
+   * OFF の間も経路と発着は表示したままにして、ドラッグ操作だけを止める。
+   */
+  setRouteSearchEditable(on: boolean) {
+    this.searchEditable = on
+    // 解除時に進行中のドラッグがあれば打ち切り、操作系を通常へ戻す。
+    if (!on && this.draggingSearch) {
+      this.draggingSearch = null
+      this.controls.enabled = true
+      this.renderer.domElement.style.cursor = ''
+    }
+  }
+
+  /** スタート/ゴールの位置を設定して描き直す（null でそのマーカーを消す）。 */
+  setRouteSearchPoints(start: SearchPoint | null, goal: SearchPoint | null) {
+    this.searchStart = start
+    this.searchGoal = goal
+    this.renderRouteSearch()
+  }
+
+  /** 探索結果の経路（lng/lat の折れ線）と中点に出すラベルを設定する。null で経路を消す。 */
+  setRouteSearchPath(coords: [number, number][] | null, label = '') {
+    this.searchPath = coords && coords.length >= 2 ? coords : null
+    this.searchPathLabel = label
+    this.renderRouteSearch()
+  }
+
+  /** マウス位置直下にある発着マーカーを返す（無ければ null） */
+  private searchHitWhich(e: PointerEvent): SearchWhich | null {
+    const meshes: THREE.Mesh[] = []
+    for (const o of this.searchObjs.values()) meshes.push(o.marker)
+    if (meshes.length === 0) return null
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    const ndc = new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1
+    )
+    this.raycaster.setFromCamera(ndc, this.camera)
+    const hit = this.raycaster.intersectObjects(meshes)[0]
+    return hit ? (hit.object.userData.searchWhich as SearchWhich) : null
+  }
+
+  /** ドラッグ中：発着のマーカー・線・ラベルを地形上の base 位置へ移動する */
+  private moveSearchObjects(which: SearchWhich, base: THREE.Vector3) {
+    const o = this.searchObjs.get(which)
+    if (!o) return
+    const s = this.annotScale
+    const top = base.y + 0.4 * s
+    o.marker.position.set(base.x, base.y, base.z)
+    const pos = o.line.geometry.attributes.position as THREE.BufferAttribute
+    pos.setXYZ(0, base.x, base.y, base.z)
+    pos.setXYZ(1, base.x, top, base.z)
+    pos.needsUpdate = true
+    o.label.position.set(base.x, top + 0.06 * s, base.z)
+  }
+
+  /** 発着マーカーと経路ハイライトを作り直す（地形グループの子にして演出に追従させる）。 */
+  private renderRouteSearch() {
+    if (this.searchGroup) {
+      this.searchGroup.removeFromParent()
+      this.searchGroup.traverse((o) => {
+        const any = o as THREE.Mesh & THREE.Sprite
+        any.geometry?.dispose?.()
+        const m = any.material as (THREE.Material & { map?: THREE.Texture }) | undefined
+        if (m) {
+          m.map?.dispose?.()
+          m.dispose?.()
+        }
+      })
+      this.searchGroup = null
+    }
+    this.searchObjs.clear()
+    this.searchLabels = []
+    const g = this.geo
+    if (!g || !this.searchMode) return
+
+    const group = new THREE.Group()
+    const s = this.annotScale
+    const stem = 0.4 * s
+
+    // 探索結果の経路。ルート線（lift=8）より高く浮かせ、重なっても隠れないようにする。
+    if (this.searchPath) {
+      const lift = 14 * g.k
+      const px: number[] = []
+      const py: number[] = []
+      const pz: number[] = []
+      for (const [lng, lat] of this.searchPath) {
+        const u = (lng - g.bbox.west) / (g.bbox.east - g.bbox.west || 1)
+        const v = (g.bbox.north - lat) / (g.bbox.north - g.bbox.south || 1)
+        px.push((u - 0.5) * g.widthMeters * g.k)
+        py.push(this.surfaceWorldY(u, v) + lift)
+        pz.push((v - 0.5) * g.heightMeters * g.k)
+      }
+      const pts: number[] = []
+      for (let i = 0; i < px.length - 1; i++) {
+        pts.push(px[i], py[i], pz[i], px[i + 1], py[i + 1], pz[i + 1])
+      }
+      const geom = new THREE.BufferGeometry()
+      geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3))
+      const line = new THREE.LineSegments(
+        geom,
+        new THREE.LineBasicMaterial({ color: SEARCH_PATH_COLOR })
+      )
+      line.renderOrder = 11 // ルート線(9)より前面
+      group.add(line)
+
+      if (this.searchPathLabel) {
+        const mid = polylineMidpoint(px, py, pz)
+        const sp = makeLabelSprite(this.searchPathLabel, SEARCH_PATH_COLOR, ROUTE_LABEL_WORLD_H * 1.3 * s)
+        sp.position.set(mid.x, mid.y + 0.05 * s, mid.z)
+        sp.renderOrder = 14
+        sp.userData.designScale = sp.scale.clone()
+        group.add(sp)
+        this.searchLabels.push(sp)
+      }
+    }
+
+    // 発着マーカー（地点マーカーと同じ構成。少し大きめ＋発=緑/着=赤で色分け）
+    const markerGeo = new THREE.SphereGeometry(0.01 * s, 14, 14)
+    const addPoint = (which: SearchWhich, p: SearchPoint, color: number) => {
+      const u = (p.lng - g.bbox.west) / (g.bbox.east - g.bbox.west || 1)
+      const v = (g.bbox.north - p.lat) / (g.bbox.north - g.bbox.south || 1)
+      const x = (u - 0.5) * g.widthMeters * g.k
+      const z = (v - 0.5) * g.heightMeters * g.k
+      const surfaceY = this.surfaceWorldY(u, v)
+      const topY = surfaceY + stem
+
+      const marker = new THREE.Mesh(
+        markerGeo,
+        new THREE.MeshBasicMaterial({
+          color,
+          polygonOffset: true,
+          polygonOffsetFactor: -2,
+          polygonOffsetUnits: -2
+        })
+      )
+      marker.position.set(x, surfaceY, z)
+      marker.renderOrder = 13
+      marker.userData.searchWhich = which
+      group.add(marker)
+
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(x, surfaceY, z),
+          new THREE.Vector3(x, topY, z)
+        ]),
+        new THREE.LineBasicMaterial({ color })
+      )
+      line.renderOrder = 12
+      group.add(line)
+
+      const label = makeLabelSprite(p.label, color, 0.034 * s)
+      label.position.set(x, topY + 0.06 * s, z)
+      label.renderOrder = 14
+      label.userData.designScale = label.scale.clone()
+      group.add(label)
+      this.searchLabels.push(label)
+
+      this.searchObjs.set(which, { marker, line, label })
+    }
+    if (this.searchStart) addPoint('start', this.searchStart, SEARCH_START_COLOR)
+    if (this.searchGoal) addPoint('goal', this.searchGoal, SEARCH_GOAL_COLOR)
+
+    ;(this.terrainGroup ?? this.scene).add(group)
+    this.searchGroup = group
+  }
+
+  /**
+   * 発着・経路のラベルを「画面に対して一定サイズ」設定へ追従させる。
+   * 常時表示にしたいので declutter には載せず、毎フレームここでスケールだけ補正する。
+   */
+  private updateSearchLabelScale() {
+    if (!this.fixedLabelSize || this.searchLabels.length === 0) return
+    const h = this.container.clientHeight || 1
+    const fovR = (this.camera.fov * Math.PI) / 180
+    const cam = this.camera.position
+    for (const sp of this.searchLabels) {
+      const dist = cam.distanceTo(sp.position)
+      const pxPerWorld = h / (2 * Math.tan(fovR / 2) * Math.max(dist, 1e-3))
+      this.applyFixedLabelScale(sp, pxPerWorld, h)
+    }
+  }
+
   /** 現在の geo と landmarks からマーカー（リーダー線＋ラベル）を作り直す */
   private renderLandmarks() {
     if (this.landmarkGroup) {
@@ -1475,6 +1736,10 @@ export class TerrainViewer {
     // ルートグループも旧地形グループの子。参照を手放し、旧グループと一緒に生かす/破棄する。
     this.routeGroup = null
     this.routeLabels = [] // 旧ラベルは旧グループと一緒に破棄される（参照だけ捨てる）
+    // 経路探索の発着・経路も旧地形グループの子。参照を手放して renderRouteSearch で作り直す。
+    this.searchGroup = null
+    this.searchObjs.clear()
+    this.searchLabels = []
     this.contourGroup = null
     // 新地点データがあれば renderLandmarks より前に反映（演出のフェード対象に含めるため）。
     if (landmarks) this.landmarks = landmarks
@@ -1560,6 +1825,7 @@ export class TerrainViewer {
     this.renderContours(group)
     this.renderLandmarks()
     this.renderRoutes()
+    this.renderRouteSearch()
 
     // グリッド（地表の基準面 y=0 に配置）。1マスをきりの良い実距離にする。
     const gridStep = niceStep(maxDim / 10) // 約10分割になる実距離(m)
@@ -2031,6 +2297,7 @@ export class TerrainViewer {
     // slide/wipe はグループが X 移動して投影がズレるので従来どおり止める。
     const isMorph = this.trans?.kind === 'morph'
     if (!this.trans || isMorph) this.declutterLabels()
+    this.updateSearchLabelScale()
     // メインシーン
     this.renderer.setViewport(0, 0, this.container.clientWidth, this.container.clientHeight)
     this.renderer.setScissorTest(false)
@@ -2194,6 +2461,31 @@ function makeLabelSprite(
   sp.userData.lines = lines.length // 画面固定サイズ計算用（行数で目標pxを決める）
   sp.userData.fixedSizeLines = fixedSizeLines
   return sp
+}
+
+/** 折れ線（ワールド頂点列）の弧長中点を返す（経路ラベルの配置位置）。 */
+function polylineMidpoint(px: number[], py: number[], pz: number[]): THREE.Vector3 {
+  const segLen: number[] = []
+  let total = 0
+  for (let i = 0; i < px.length - 1; i++) {
+    const l = Math.hypot(px[i + 1] - px[i], py[i + 1] - py[i], pz[i + 1] - pz[i])
+    segLen.push(l)
+    total += l
+  }
+  const half = total / 2
+  let acc = 0
+  for (let i = 0; i < segLen.length; i++) {
+    if (acc + segLen[i] >= half) {
+      const f = segLen[i] > 0 ? (half - acc) / segLen[i] : 0
+      return new THREE.Vector3(
+        px[i] + (px[i + 1] - px[i]) * f,
+        py[i] + (py[i + 1] - py[i]) * f,
+        pz[i] + (pz[i + 1] - pz[i]) * f
+      )
+    }
+    acc += segLen[i]
+  }
+  return new THREE.Vector3(px[0] ?? 0, py[0] ?? 0, pz[0] ?? 0)
 }
 
 /** グリッドに平行で上向きの距離ラベル板を作る。 */

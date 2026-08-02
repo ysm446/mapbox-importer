@@ -612,6 +612,22 @@ app.whenReady().then(() => {
     return sampleElevation(values16, h.width, h.height, h.bbox, h.zoom, h.minEle, h.maxEle, lng, lat)
   })
 
+  // --- 標高サンプリング（複数地点をまとめて。経路の勾配算出用） ---
+  // 1点ごとに呼ぶと u16 を毎回読み直すことになるため、読み込み1回でまとめて返す。
+  ipcMain.handle(
+    'workspace:sampleElevations',
+    async (_e, id: string, points: [number, number][]) => {
+      const dir = await ensureDataDir()
+      const ws = await getWorkspace(dir, id)
+      if (!ws) return null
+      const h = ws.heightmap
+      const values16 = await readValues16(dir, id)
+      return points.map(([lng, lat]) =>
+        sampleElevation(values16, h.width, h.height, h.bbox, h.zoom, h.minEle, h.maxEle, lng, lat)
+      )
+    }
+  )
+
   // --- ワークスペース: ハイトマップを PNG16 / R16 で書き出す ---
   ipcMain.handle('workspace:export', async (_e, id: string, format: 'png16' | 'raw16') => {
     const dir = await ensureDataDir()

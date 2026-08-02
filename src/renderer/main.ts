@@ -14,7 +14,15 @@ import type {
   AppSettings,
   RootInfo
 } from '../preload/index'
-import { TerrainViewer } from './viewer3d'
+import { TerrainViewer, type SearchWhich } from './viewer3d'
+import {
+  buildRouteGraph,
+  snapToGraph,
+  findPath,
+  computePathMetrics,
+  type RouteGraph,
+  type PathMetrics
+} from './routing'
 import { t, setLang, getLang, applyDom, type Lang } from './i18n'
 import {
   TILE_SIZE as TILE,
@@ -91,6 +99,16 @@ const chkRouteTrail = $<HTMLInputElement>('chk-route-trail')
 const chkRouteRail = $<HTMLInputElement>('chk-route-rail')
 const chkRouteAerialway = $<HTMLInputElement>('chk-route-aerialway')
 const chkRouteClip = $<HTMLInputElement>('chk-route-clip')
+// 経路探索
+const btnRouteSearch = $<HTMLButtonElement>('btn-route-search')
+const btnRouteSearchReset = $<HTMLButtonElement>('btn-route-search-reset')
+const routeSearchStatus = $('route-search-status')
+const routeSearchResult = $('route-search-result')
+const chkSearchRoad = $<HTMLInputElement>('chk-search-road')
+const chkSearchFoot = $<HTMLInputElement>('chk-search-foot')
+const chkSearchTrail = $<HTMLInputElement>('chk-search-trail')
+const chkSearchRail = $<HTMLInputElement>('chk-search-rail')
+const chkSearchAerialway = $<HTMLInputElement>('chk-search-aerialway')
 const btnTileGrid = $<HTMLButtonElement>('btn-tile-grid')
 const chkShowTerrain = $<HTMLInputElement>('chk-show-terrain')
 const chkShowGrid = $<HTMLInputElement>('chk-show-grid')
@@ -517,6 +535,7 @@ routeDistanceModeSel.addEventListener('change', () => {
   const m = routeDistanceModeSel.value as 'horizontal' | 'surface'
   viewer?.setRouteDistanceMode(m)
   api.setSettings({ routeDistanceMode: m })
+  if (searchMode) void runRouteSearch() // 探索結果の距離表示も同じ基準に合わせる
 })
 
 // 右ペインの幅をドラッグで変更（#main-pane と #right-pane の間の仕切り）
@@ -597,13 +616,25 @@ document.addEventListener('keydown', (e) => {
  * ワークスペースを隠し、選択行の下に中身（地点等）を表示する。
  */
 let detailMode = false
+/** ロケーション内で開いているサブタブ。3Dで触れる対象をタブごとに絞るのに使う。 */
+let wsSubtab: 'landmarks' | 'routes' | 'export' = 'landmarks'
+
+/**
+ * 3Dで掴める対象を、開いているサブタブに合わせて切り替える。
+ * 地点のピンはランドマークタブ、経路探索の発着マーカーはルートタブのときだけ動かせる
+ * （別タブでの作業中に誤って動かしてしまうのを防ぐ）。
+ */
+function applyEditableForSubtab() {
+  viewer?.setLandmarksEditable(detailMode && wsSubtab === 'landmarks')
+  viewer?.setRouteSearchEditable(detailMode && wsSubtab === 'routes')
+}
+
 function showWorkspaceDetail(on: boolean) {
   detailMode = on
   rviewLibraryEl.classList.toggle('detail', on)
-  // 詳細（地点編集）モードのときだけ 3D のピンをドラッグ可能にする（誤操作防止）
-  viewer?.setLandmarksEditable(on)
-  // 詳細を開くたびにランドマークタブから始める
+  // 詳細を開くたびにランドマークタブから始める（showWsSubtab 内で編集可否も反映される）
   if (on) showWsSubtab('landmarks')
+  else applyEditableForSubtab()
 }
 wsBack.addEventListener('click', () => {
   setPlaceMode(false)
@@ -859,6 +890,12 @@ function refreshDynamicTexts() {
   if (!selectedId) selectedInfo.textContent = t('selected.none')
   refreshLibrary()
   renderLandmarkPanel()
+  // 3D の発着ラベルはスプライトに焼かれているので、言語が変わったら作り直す
+  if (searchMode) {
+    pushSearchPoints()
+    routeSearchStatus.textContent = t('search.hint')
+    void runRouteSearch()
+  }
 }
 
 // 選択範囲の矩形を描画する（四隅のリサイズ用ハンドルも描画）
@@ -1304,7 +1341,7 @@ function showTab(which: 'map' | '2d' | '3d') {
       viewer.setRouteCategoryVisible('rail', chkShowRouteRail.checked)
       viewer.setRouteCategoryVisible('aerialway', chkShowRouteAerialway.checked)
       viewer.setRouteLabelsVisible(chkShowRouteInfo.checked)
-      viewer.setLandmarksEditable(detailMode)
+      applyEditableForSubtab()
       viewer.setRenderMode(renderModeSel.value as 'default' | 'heightmap' | 'satellite')
       viewer.setBackgroundColor(backgroundColorInput.value)
       viewer.setAutoRotate(autoRotate)
@@ -1326,6 +1363,7 @@ function showTab(which: 'map' | '2d' | '3d') {
     }
     viewer.setLandmarks(landmarks) // 初回生成時にも反映
     viewer.setRoutes(routes) // 保存済みルートを地形にドレープ
+    applyRouteSearchToViewer() // 経路探索モード中なら発着・経路も戻す
   }
 }
 tabMap.addEventListener('click', () => showTab('map'))
@@ -1356,13 +1394,16 @@ const subviewRoutes = $('subview-routes')
 const subviewExport = $('subview-export')
 
 function showWsSubtab(which: 'landmarks' | 'routes' | 'export') {
+  wsSubtab = which
   subtabLandmarks.classList.toggle('active', which === 'landmarks')
   subtabRoutes.classList.toggle('active', which === 'routes')
   subtabExport.classList.toggle('active', which === 'export')
   subviewLandmarks.classList.toggle('hidden', which !== 'landmarks')
   subviewRoutes.classList.toggle('hidden', which !== 'routes')
   subviewExport.classList.toggle('hidden', which !== 'export')
-  // ルートタブから離れたら地点配置モードと混同しないよう、配置モードは触らない。
+  // ランドマークタブを離れたら配置モードも解除する（他タブの作業中に地点が増えるのを防ぐ）
+  if (which !== 'landmarks' && placeMode) setPlaceMode(false)
+  applyEditableForSubtab()
 }
 subtabLandmarks.addEventListener('click', () => showWsSubtab('landmarks'))
 subtabRoutes.addEventListener('click', () => showWsSubtab('routes'))
@@ -1487,6 +1528,7 @@ function showPreview(
   // viewer 有: 上の setData で反映済み（演出のフェード対象に含めるため）。
   // viewer 無: pendingMesh とともに 3Dタブ表示時に setLandmarks で反映。
   setPlaceMode(false)
+  setRouteSearchEnabled(false) // 別ロケーションの発着・経路を持ち越さない
   landmarks = workspace.landmarks
   renderLandmarkPanel()
   loadRoutes(workspace)
@@ -1514,6 +1556,7 @@ function updateViewer3dInfo(mesh: MeshPayload, h: HeightmapMeta) {
 /** 選択が無くなったときにランドマーク表示をクリアする */
 function clearAnnotations() {
   setPlaceMode(false)
+  setRouteSearchEnabled(false)
   selectedBbox = null
   landmarks = []
   viewer?.setLandmarks([])
@@ -1947,6 +1990,186 @@ function renderRoutePanel() {
     li.append(top)
     routeList.appendChild(li)
   }
+}
+
+// ---- 経路探索（取り込んだルート網の上でスタート→ゴールを結ぶ） ----
+let searchMode = false
+let searchStart: { lng: number; lat: number } | null = null
+let searchGoal: { lng: number; lat: number } | null = null
+// ルート網のグラフ。ルートの増減・表示切替・対象種別の変更があったら組み直す。
+let routeGraph: RouteGraph | null = null
+let routeGraphSig = ''
+// 連続ドラッグで古い探索結果が新しい結果を上書きしないようにする通し番号
+let searchSeq = 0
+
+function selectedSearchCats(): RouteCategory[] {
+  const cats: RouteCategory[] = []
+  if (chkSearchRoad.checked) cats.push('road')
+  if (chkSearchFoot.checked) cats.push('foot')
+  if (chkSearchTrail.checked) cats.push('trail')
+  if (chkSearchRail.checked) cats.push('rail')
+  if (chkSearchAerialway.checked) cats.push('aerialway')
+  return cats
+}
+
+/** 現在のルート集合・対象種別に対応するグラフを返す（署名が変わったときだけ組み直す） */
+function ensureRouteGraph(cats: RouteCategory[]): RouteGraph {
+  // coords は作成後に変わらないので、id と表示状態だけで十分な署名になる。
+  const sig =
+    cats.join(',') + '|' + routes.map((r) => `${r.id}:${r.visible === false ? 0 : 1}`).join(',')
+  if (!routeGraph || sig !== routeGraphSig) {
+    routeGraph = buildRouteGraph(routes, cats)
+    routeGraphSig = sig
+  }
+  return routeGraph
+}
+
+/** 発着の現在位置を3Dビューワへ送る（ラベルは表示言語に追従させる） */
+function pushSearchPoints() {
+  viewer?.setRouteSearchPoints(
+    searchStart ? { ...searchStart, label: t('search.start') } : null,
+    searchGoal ? { ...searchGoal, label: t('search.goal') } : null
+  )
+}
+
+/** 発着を bbox の対角 30% / 70% に置き直す（どちらも画面に入り、掴み分けやすい位置） */
+function resetSearchPoints() {
+  const b = selectedBbox
+  if (!b) return
+  searchStart = {
+    lng: b.west + (b.east - b.west) * 0.3,
+    lat: b.south + (b.north - b.south) * 0.3
+  }
+  searchGoal = {
+    lng: b.west + (b.east - b.west) * 0.7,
+    lat: b.south + (b.north - b.south) * 0.7
+  }
+}
+
+function clearSearchResult() {
+  routeSearchResult.hidden = true
+  routeSearchResult.replaceChildren()
+}
+
+function setRouteSearchEnabled(on: boolean) {
+  searchMode = on && !!selectedId
+  btnRouteSearch.classList.toggle('active', searchMode)
+  btnRouteSearchReset.hidden = !searchMode
+  if (!searchMode) {
+    searchStart = null
+    searchGoal = null
+    routeSearchStatus.textContent = ''
+    clearSearchResult()
+    viewer?.setRouteSearchMode(false)
+    return
+  }
+  // 発着位置は showTab より先に決める（3Dビューワ生成時の復元で位置なしにならないように）
+  if (!searchStart || !searchGoal) resetSearchPoints()
+  showTab('3d') // 発着のドラッグは3Dビューで行う
+  viewer?.setRouteSearchMode(true, onMoveSearchPoint)
+  pushSearchPoints()
+  routeSearchStatus.textContent = t('search.hint')
+  void runRouteSearch()
+}
+
+/** 3Dで発着マーカーをドラッグして離したとき：位置を更新して引き直す */
+function onMoveSearchPoint(which: SearchWhich, lng: number, lat: number) {
+  if (!searchMode) return
+  if (which === 'start') searchStart = { lng, lat }
+  else searchGoal = { lng, lat }
+  pushSearchPoints()
+  void runRouteSearch()
+}
+
+/** 3Dビューワを生成し直した後に経路探索の表示状態を戻す */
+function applyRouteSearchToViewer() {
+  if (!searchMode) return
+  viewer?.setRouteSearchMode(true, onMoveSearchPoint)
+  pushSearchPoints()
+  void runRouteSearch()
+}
+
+async function runRouteSearch() {
+  if (!searchMode || !selectedId || !searchStart || !searchGoal) return
+  const seq = ++searchSeq
+  const wsId = selectedId
+  const fail = (msg: string) => {
+    routeSearchStatus.textContent = msg
+    clearSearchResult()
+    viewer?.setRouteSearchPath(null)
+  }
+
+  const cats = selectedSearchCats()
+  if (cats.length === 0) return fail(t('search.needCats'))
+  const graph = ensureRouteGraph(cats)
+  if (graph.segA.length === 0) return fail(t('search.needRoutes'))
+
+  const from = snapToGraph(graph, searchStart.lng, searchStart.lat)
+  const to = snapToGraph(graph, searchGoal.lng, searchGoal.lat)
+  if (!from || !to) return fail(t('search.needRoutes'))
+  const coords = findPath(graph, from, to)
+  if (!coords) return fail(t('search.noPath'))
+
+  // 勾配はフル解像度の標高から出す（表示メッシュは256頂点に間引かれていて平滑化されるため）
+  routeSearchStatus.textContent = t('search.searching')
+  let elevations: number[] | null = null
+  try {
+    elevations = await api.sampleElevations(wsId, coords)
+  } catch (err) {
+    return fail(t('search.failed') + (err as Error).message)
+  }
+  // 探索中にロケーション切替・モード解除・次のドラッグが起きていたら結果を捨てる
+  if (seq !== searchSeq || selectedId !== wsId || !searchMode) return
+
+  const metrics = computePathMetrics(coords, elevations ?? coords.map(() => 0))
+  const distMeters =
+    routeDistanceModeSel.value === 'surface' ? metrics.surfaceMeters : metrics.horizontalMeters
+  viewer?.setRouteSearchPath(
+    coords,
+    `${(distMeters / 1000).toFixed(1)}km/${Math.round(metrics.averageGradePercent)}%`
+  )
+  routeSearchStatus.textContent = t('search.hint')
+  renderSearchResult(distMeters, metrics, Math.max(from.distMeters, to.distMeters))
+}
+
+function renderSearchResult(distMeters: number, m: PathMetrics, snapMeters: number) {
+  const rows: [string, string][] = [
+    [t('search.distance'), `${(distMeters / 1000).toFixed(2)} km`],
+    [t('search.ascent'), `${Math.round(m.ascentMeters)} m`],
+    [t('search.descent'), `${Math.round(m.descentMeters)} m`],
+    [t('search.grade'), `${m.averageGradePercent.toFixed(1)} %`],
+    [t('search.snap'), `${Math.round(snapMeters)} m`]
+  ]
+  routeSearchResult.replaceChildren()
+  for (const [key, value] of rows) {
+    const k = document.createElement('div')
+    k.className = 'k'
+    k.textContent = key
+    const v = document.createElement('div')
+    v.className = 'v'
+    v.textContent = value
+    routeSearchResult.append(k, v)
+  }
+  routeSearchResult.hidden = false
+}
+
+btnRouteSearch.addEventListener('click', () => {
+  if (!selectedId) {
+    routeSearchStatus.textContent = t('search.needWorkspace')
+    return
+  }
+  setRouteSearchEnabled(!searchMode)
+})
+btnRouteSearchReset.addEventListener('click', () => {
+  if (!searchMode) return
+  resetSearchPoints()
+  pushSearchPoints()
+  void runRouteSearch()
+})
+for (const el of [chkSearchRoad, chkSearchFoot, chkSearchTrail, chkSearchRail, chkSearchAerialway]) {
+  el.addEventListener('change', () => {
+    if (searchMode) void runRouteSearch()
+  })
 }
 
 /** 選択ワークスペースのルート表示を初期化する */
