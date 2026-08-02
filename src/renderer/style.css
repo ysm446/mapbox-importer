@@ -89,9 +89,43 @@ body {
   background: var(--bg);
   color: var(--text);
 }
+body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 #app {
   display: flex;
-  height: 100vh;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+#status-bar {
+  flex: 0 0 24px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+}
+#status-bar .status-indicator {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-bright);
+}
+#progress {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 左の大きいビュー領域 */

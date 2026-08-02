@@ -58,6 +58,9 @@ const previewEmpty = $('preview-empty')
 const viewer3dInfo = $('viewer3d-info')
 const viewer3dTitle = $('viewer3d-title')
 const progress = $('progress')
+const resetStatus = () => {
+  progress.textContent = t('status.ready')
+}
 const exportTextureFormat = $<HTMLSelectElement>('export-texture-format')
 const btnExportTexture = $<HTMLButtonElement>('btn-export-texture')
 const btnExportZip = $<HTMLButtonElement>('btn-export-zip')
@@ -569,7 +572,7 @@ async function saveCurrentScreenshot() {
     const res = await api.saveScreenshot()
     if (res.saved && res.filePath) progress.textContent = t('screenshot.saved') + res.filePath
   } catch (err) {
-    progress.textContent = ''
+    resetStatus()
     alert(t('screenshot.failed') + (err as Error).message)
   } finally {
     savingScreenshot = false
@@ -2004,7 +2007,7 @@ $('btn-generate').addEventListener('click', async () => {
     showTab('3d') // 生成後は3Dで確認
     await fetchAndSaveSatellite(res.workspace.id, b, zoom)
   } catch (err) {
-    progress.textContent = ''
+    resetStatus()
     alert(t('gen.failed') + (err as Error).message)
   }
 })
@@ -2033,7 +2036,7 @@ btnUpdateTerrain.addEventListener('click', async () => {
     showTab('3d')
     await fetchAndSaveSatellite(res.workspace.id, b, zoom)
   } catch (err) {
-    progress.textContent = ''
+    resetStatus()
     alert(t('gen.failed') + (err as Error).message)
   }
 })
@@ -2275,9 +2278,9 @@ async function selectItem(id: string) {
       { padding: locationFitPadding(), duration: 600 }
     )
 
-    progress.textContent = ''
+    resetStatus()
   } catch (err) {
-    progress.textContent = ''
+    resetStatus()
     alert(t('load.failed') + (err as Error).message)
   }
 }
