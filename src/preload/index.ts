@@ -57,6 +57,22 @@ export interface SatelliteTilesPayload {
   tiles: SatelliteTile[]
 }
 
+/** ルート切替メニューに出す候補（最近使ったフォルダ＋既定フォルダ） */
+export interface RootEntry {
+  path: string
+  name: string
+  exists: boolean
+}
+
+/** 現在のルートフォルダと切替候補 */
+export interface RootInfo {
+  path: string
+  name: string
+  defaultPath: string
+  isDefault: boolean
+  recent: RootEntry[]
+}
+
 export interface AppSettings {
   mapStyle?: string
   lang?: 'ja' | 'en'
@@ -96,6 +112,11 @@ export interface AppSettings {
 const api = {
   getConfig: (): Promise<{ token?: string }> => ipcRenderer.invoke('config:get'),
   setToken: (token: string): Promise<boolean> => ipcRenderer.invoke('config:setToken', token),
+  // ルートフォルダ（ロケーション群の入れ物）
+  getRoot: (): Promise<RootInfo> => ipcRenderer.invoke('root:get'),
+  setRoot: (dir: string): Promise<RootInfo> => ipcRenderer.invoke('root:set', dir),
+  chooseRoot: (): Promise<RootInfo | null> => ipcRenderer.invoke('root:choose'),
+  forgetRoot: (dir: string): Promise<RootInfo> => ipcRenderer.invoke('root:forget', dir),
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
   setSettings: (patch: AppSettings): Promise<boolean> =>
     ipcRenderer.invoke('settings:set', patch),

@@ -11,7 +11,8 @@ import type {
   Route,
   RouteCategory,
   OsmFeature,
-  AppSettings
+  AppSettings,
+  RootInfo
 } from '../preload/index'
 import { TerrainViewer } from './viewer3d'
 import { t, setLang, getLang, applyDom, type Lang } from './i18n'
@@ -2101,6 +2102,107 @@ libList.addEventListener('dragover', (ev) => {
   else libList.insertBefore(draggingEl, after)
 })
 
+// ---- データのルートフォルダ（ロケーション群の入れ物）----
+// 切替は保存済みデータの読み替えなので、選択中ロケーション・3Dビュー・地図の状態を
+// 中途半端に引きずらないよう、ルートを保存してからウィンドウごと読み込み直す。
+// 環境設定は userData 側にあるため、リロードしても言語やUI設定は保たれる。
+const rootBtn = $<HTMLButtonElement>('btn-root')
+const rootNameEl = $('root-name')
+const rootMenu = $('root-menu')
+let rootInfo: RootInfo | null = null
+
+function closeRootMenu() {
+  rootMenu.classList.add('hidden')
+  rootBtn.classList.remove('active')
+}
+
+function applyRootInfo(info: RootInfo) {
+  rootInfo = info
+  rootNameEl.textContent = info.name
+  rootBtn.title = info.path
+}
+
+async function refreshRoot() {
+  applyRootInfo(await api.getRoot())
+}
+
+async function switchRoot(path: string) {
+  if (!rootInfo || path === rootInfo.path) return closeRootMenu()
+  try {
+    await api.setRoot(path)
+    location.reload()
+  } catch (err) {
+    closeRootMenu()
+    alert(t('root.switchFailed') + (err as Error).message)
+  }
+}
+
+function buildRootMenu() {
+  rootMenu.innerHTML = ''
+  if (!rootInfo) return
+  for (const entry of rootInfo.recent) {
+    const row = document.createElement('div')
+    row.className = 'root-menu-row'
+
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'root-menu-item'
+    btn.classList.toggle('current', entry.path === rootInfo.path)
+    btn.disabled = !entry.exists
+    btn.title = entry.path
+
+    const name = document.createElement('span')
+    name.className = 'root-menu-name'
+    name.textContent = entry.name
+    const note = document.createElement('span')
+    note.className = 'root-menu-note'
+    if (!entry.exists) note.textContent = t('root.missing')
+    else if (entry.path === rootInfo.defaultPath) note.textContent = t('root.default')
+    btn.append(name, note)
+    btn.addEventListener('click', () => switchRoot(entry.path))
+    row.append(btn)
+
+    // 現在のルートと既定フォルダは常に出したいので、履歴から消せるのはそれ以外だけ
+    if (entry.path !== rootInfo.path && entry.path !== rootInfo.defaultPath) {
+      const forget = document.createElement('button')
+      forget.type = 'button'
+      forget.className = 'root-menu-forget'
+      forget.title = t('root.forget')
+      forget.textContent = '×'
+      forget.addEventListener('click', async () => {
+        applyRootInfo(await api.forgetRoot(entry.path))
+        buildRootMenu()
+      })
+      row.append(forget)
+    }
+    rootMenu.append(row)
+  }
+
+  const choose = document.createElement('button')
+  choose.type = 'button'
+  choose.className = 'root-menu-item root-menu-choose'
+  choose.textContent = t('root.choose')
+  choose.addEventListener('click', async () => {
+    const info = await api.chooseRoot()
+    if (info) location.reload()
+    else closeRootMenu()
+  })
+  rootMenu.append(choose)
+}
+
+rootBtn.addEventListener('click', (e) => {
+  e.stopPropagation() // 直後の document クリックで閉じないように
+  const opening = rootMenu.classList.contains('hidden')
+  if (opening) buildRootMenu()
+  rootMenu.classList.toggle('hidden', !opening)
+  rootBtn.classList.toggle('active', opening)
+})
+rootMenu.addEventListener('click', (e) => e.stopPropagation())
+document.addEventListener('click', closeRootMenu)
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeRootMenu()
+})
+
 async function refreshLibrary() {
   const workspaces = await api.listWorkspaces()
   const countText = `${workspaces.length}${t('count.items')}`
@@ -2414,5 +2516,6 @@ btnImportZip.addEventListener('click', async () => {
   // diff:false で完全リロード（言語パラメータだけの変更でもタイルを再取得させる）
   map.setStyle(makeStyle(token, currentStyleKey), { diff: false })
   updateEstimate()
+  await refreshRoot()
   await refreshLibrary()
 })()

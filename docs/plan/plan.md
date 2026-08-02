@@ -11,6 +11,7 @@
 - 共通ランドマークライブラリ：Git管理するマスターを `assets/landmarks/landmark-library.json` に置き、`data/landmark-library.json` をローカル作業コピーとして初回生成
 - 3D 等高線：表示/間隔/単色設定に加え、単色/グラデーション切替とバー型キーポイントUIによるグラデーション編集
 - UI ステータスバー：画面下部に常設し、生成・更新・読み込み・入出力・スクリーンショットの進捗と結果を表示
+- ルートフォルダ：ロケーションの保存先を切替可能にし（`userData/config.json` の `rootDir`/`recentRoots`）、環境設定は `userData/settings.json` へ共通化。テーマ別にデータを分離できる
 
 ## 進行中
 - **OSM ルート／カーブ**

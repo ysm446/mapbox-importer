@@ -3,6 +3,9 @@
 形式: 新しいものを上に。日付は YYYY-MM-DD。
 
 ## 2026-08-02
+- データ分離：ロケーション群の保存先を「ルートフォルダ」として切り替えられるようにした。現在のルートと最近使ったフォルダは `userData/config.json` の `rootDir` / `recentRoots` に保存し、ライブラリタブ上部の「データフォルダ」ボタンから切替・履歴削除・フォルダ選択ダイアログを操作できる。切替時は選択中ロケーションや3Dビューの状態を引きずらないようウィンドウを読み込み直す。ルートが消えていた場合は既定の `data/` へ自動で戻す。IPC は `root:get` / `root:set` / `root:choose` / `root:forget` を追加。
+- データ分離：環境設定 `settings.json` をルート配下から `userData/` へ移し、ルートを切り替えても言語・地図スタイル・3D表示設定を保つようにした。旧 `data/settings.json` があれば初回起動時に自動移行する。`landmark-library.json` と `screenshot/` はルートごとに持つため、フォルダ単位で完結してコピー／持ち運びできる。
+- データ分離：`data/` の23ロケーションを `E:\sample files\location-viewer\` 配下へコピーして分割（`japanese-history` に関が原1件、`japanese-mountains` に富士山・北岳など日本の地形14件、`swiss` にツェルマット・アルブラ峠などスイスの地形8件）。各ルートへ `landmark-library.json` も配置。全92ファイルを SHA256 で照合して一致を確認。`data/` は現状のまま残してある。
 - 型：`countOutsideLandmarks()` で `selectedBbox` をローカル定数に束縛してから null チェックするよう修正。`filter` コールバック内へナローイングが引き継がれず `TS2345`（`BBox | null` を `BBox` に渡せない）が出ていた既存の型エラーを解消。`npx tsc --noEmit` と `npm run build` の両方が通ることを確認済み。
 - UI：生成パネル内にあった進捗表示を画面下部の常設ステータスバーへ移動。生成・地形更新・ロケーション読み込み・エクスポート/インポート・F12スクリーンショットの処理中および完了メッセージを全タブから確認できるようにし、メッセージがない場合は「準備完了」/「Ready」を表示する。長い保存先パスはバー内で省略し、`role=status` と `aria-live=polite` で通知内容を支援技術にも伝える。`npm run build` で確認済み。
 

@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu } from 'electron'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { promises as fs } from 'fs'
 import { BBox, TILE_SIZE, TILE_SOURCES, computeRegion, downloadTiles } from './tiles'
 import { fetchOsmFeatures, fetchOsmTagsByIds, classify } from './osm'
@@ -43,27 +43,88 @@ import { writeZip, readZip } from './zip'
 
 interface Config {
   token?: string
+  /** 現在のルートフォルダ（ロケーション群の入れ物）。未設定なら既定の data/ */
+  rootDir?: string
+  /** 最近使ったルートフォルダ（新しい順） */
+  recentRoots?: string[]
 }
+
+const MAX_RECENT_ROOTS = 8
 
 // app 準備後に解決する（モジュール最上位で app.getPath を呼ばない）
 function configPath(): string {
   return join(app.getPath('userData'), 'config.json')
 }
 
-// 出力の既定フォルダ = プロジェクト直下の data/
+// 既定のルートフォルダ = プロジェクト直下の data/
 // 開発時は process.cwd() がプロジェクトルート。パッケージ後は exe の隣の data/。
-function dataDir(): string {
+function defaultRootDir(): string {
   const base = app.isPackaged ? join(app.getPath('exe'), '..') : process.cwd()
   return join(base, 'data')
 }
 
+async function isDir(p: string): Promise<boolean> {
+  try {
+    return (await fs.stat(p)).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+// 現在のルートフォルダ。config.json の rootDir を優先し、消えていれば既定へ戻す。
+let currentRoot: string | null = null
+
+async function rootDir(): Promise<string> {
+  if (currentRoot) return currentRoot
+  const cfg = await loadConfig()
+  currentRoot = cfg.rootDir && (await isDir(cfg.rootDir)) ? cfg.rootDir : defaultRootDir()
+  return currentRoot
+}
+
 async function ensureDataDir(): Promise<string> {
-  const dir = dataDir()
+  const dir = await rootDir()
   await fs.mkdir(dir, { recursive: true })
   return dir
 }
 
-// data/settings.json … アプリの環境設定（地図スタイル・言語など）
+/** ルート切替UI用の情報。recent には既定フォルダを必ず含める（戻れるように） */
+interface RootEntry {
+  path: string
+  name: string
+  exists: boolean
+}
+interface RootInfo {
+  path: string
+  name: string
+  defaultPath: string
+  isDefault: boolean
+  recent: RootEntry[]
+}
+
+async function rootInfo(): Promise<RootInfo> {
+  const cfg = await loadConfig()
+  const path = await rootDir()
+  const def = defaultRootDir()
+  const paths = [...new Set([path, ...(cfg.recentRoots ?? []), def])]
+  const recent: RootEntry[] = []
+  for (const p of paths) {
+    recent.push({ path: p, name: basename(p), exists: await isDir(p) })
+  }
+  return { path, name: basename(path), defaultPath: def, isDefault: path === def, recent }
+}
+
+async function setRoot(dir: string): Promise<RootInfo> {
+  if (!(await isDir(dir))) throw new Error(`フォルダが見つかりません: ${dir}`)
+  const cfg = await loadConfig()
+  cfg.rootDir = dir
+  cfg.recentRoots = [dir, ...(cfg.recentRoots ?? []).filter((p) => p !== dir)].slice(0, MAX_RECENT_ROOTS)
+  await saveConfig(cfg)
+  currentRoot = dir
+  return rootInfo()
+}
+
+// userData/settings.json … アプリの環境設定（地図スタイル・言語など）。
+// ルートフォルダを切り替えても言語やUI設定は保ちたいので、ルート配下ではなく userData に置く。
 interface Settings {
   mapStyle?: string
   lang?: 'ja' | 'en'
@@ -82,8 +143,28 @@ interface Settings {
   cameraFov?: number
   transition?: 'none' | 'slide' | 'wipe' | 'morph'
 }
-function settingsPath(dir: string): string {
-  return join(dir, 'settings.json')
+function settingsPath(): string {
+  return join(app.getPath('userData'), 'settings.json')
+}
+
+/** 旧構成（data/settings.json）から userData へ一度だけ移行する */
+async function migrateSettings(): Promise<void> {
+  if (await fileExists(settingsPath())) return
+  try {
+    const legacy = await fs.readFile(join(defaultRootDir(), 'settings.json'), 'utf-8')
+    await fs.writeFile(settingsPath(), legacy, 'utf-8')
+  } catch {
+    /* 旧設定が無ければ何もしない */
+  }
+}
+
+async function fileExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function screenshotDir(dir: string): string {
@@ -97,17 +178,16 @@ function timestampForFile(d = new Date()): string {
   )}`
 }
 async function loadSettings(): Promise<Settings> {
+  await migrateSettings()
   try {
-    const dir = await ensureDataDir()
-    return JSON.parse(await fs.readFile(settingsPath(dir), 'utf-8'))
+    return JSON.parse(await fs.readFile(settingsPath(), 'utf-8'))
   } catch {
     return {}
   }
 }
 async function saveSettings(patch: Settings): Promise<void> {
-  const dir = await ensureDataDir()
   const cur = await loadSettings()
-  await fs.writeFile(settingsPath(dir), JSON.stringify({ ...cur, ...patch }, null, 2), 'utf-8')
+  await fs.writeFile(settingsPath(), JSON.stringify({ ...cur, ...patch }, null, 2), 'utf-8')
 }
 
 async function loadConfig(): Promise<Config> {
@@ -280,14 +360,33 @@ app.whenReady().then(() => {
     return true
   })
 
-  // --- 環境設定（data/settings.json） ---
+  // --- ルートフォルダ（ロケーション群の入れ物）の取得・切替 ---
+  ipcMain.handle('root:get', async () => rootInfo())
+  ipcMain.handle('root:set', async (_e, dir: string) => setRoot(dir))
+  ipcMain.handle('root:choose', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      title: 'データフォルダ（ルート）を選択',
+      defaultPath: await rootDir(),
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (canceled || !filePaths?.length) return null
+    return setRoot(filePaths[0])
+  })
+  ipcMain.handle('root:forget', async (_e, dir: string) => {
+    const cfg = await loadConfig()
+    cfg.recentRoots = (cfg.recentRoots ?? []).filter((p) => p !== dir)
+    await saveConfig(cfg)
+    return rootInfo()
+  })
+
+  // --- 環境設定（userData/settings.json。全ルート共通） ---
   ipcMain.handle('settings:get', async () => loadSettings())
   ipcMain.handle('settings:set', async (_e, patch: Settings) => {
     await saveSettings(patch)
     return true
   })
 
-  // --- スクリーンショット: 現在のウィンドウを data/screenshot に保存 ---
+  // --- スクリーンショット: 現在のウィンドウをルート配下の screenshot/ に保存 ---
   ipcMain.handle('screenshot:save', async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) throw new Error('ウィンドウが見つかりません。')

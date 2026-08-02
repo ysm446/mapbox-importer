@@ -189,6 +189,20 @@
         <!-- ワークスペース（クリックでドリルイン：選択以外を隠し、中身を下に並べる） -->
         <div id="rview-library" class="rview">
           <section id="ws-panel">
+            <!-- データのルートフォルダ（ロケーション群の入れ物）。クリックで切替 -->
+            <div id="root-bar">
+              <span class="root-caption" data-i18n="root.label">データフォルダ</span>
+              <div id="root-menu-wrap">
+                <button id="btn-root" type="button" data-i18n-title="root.switch" title="データフォルダを切り替え">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                  </svg>
+                  <span id="root-name">data</span>
+                  <span class="caret" aria-hidden="true">▾</span>
+                </button>
+                <div id="root-menu" class="popup-menu hidden"></div>
+              </div>
+            </div>
             <!-- 一覧モードのヘッダ -->
             <div class="row" id="ws-list-header" style="justify-content: space-between">
               <label id="lib-count" style="margin: 0">ロケーション</label>
