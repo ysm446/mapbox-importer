@@ -19,6 +19,8 @@
           <!-- 位置選択（地図） -->
           <div id="view-map" class="view">
             <div id="map"></div>
+            <!-- Shift 押下中にマウス位置の標高を表示するツールチップ -->
+            <div id="map-elev-tip" hidden></div>
             <!-- 生成パネル（位置選択タブのときだけ地図上にオーバーレイ表示） -->
             <div id="left-pane">
               <section class="card">
@@ -56,6 +58,16 @@
               </section>
             </div>
             <div id="map-overlay">
+              <form id="coord-form" data-i18n-title="map.coord.title">
+                <input
+                  id="coord-input"
+                  type="text"
+                  spellcheck="false"
+                  data-i18n-placeholder="map.coord.placeholder"
+                  placeholder="座標を貼り付け (例: 35.3606, 138.7274)"
+                />
+                <button id="btn-coord-go" type="submit" data-i18n="map.coord.go">移動</button>
+              </form>
               <select id="map-style" data-i18n-title="map.style.title">
                 <option value="satellite" data-i18n="style.satellite">衛星写真</option>
                 <option value="satellite-streets" data-i18n="style.satellite-streets">
@@ -170,7 +182,7 @@
               </div>
             </div>
             <div id="viewer3d-help" data-i18n="view3d.hint">
-              ドラッグ=回転 / ホイール=ズーム / 中・右ドラッグ=パン / O=自動回転
+              ドラッグ=回転 / ホイール=ズーム / 中・右ドラッグ=パン / O=自動回転 / Shift=標高
             </div>
           </div>
         </div>

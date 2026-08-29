@@ -105,12 +105,26 @@ export class TerrainViewer {
   private camera: THREE.PerspectiveCamera
   private controls: OrbitControls
   private handleKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Shift') this.shiftHeld = true
     const target = e.target as HTMLElement | null
     if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
     if (e.ctrlKey || e.metaKey || e.altKey) return
     if (e.code === 'KeyF') this.focusOrbitOnModelCenter()
     else if (e.code === 'KeyA') this.fitOrbitToModel()
   }
+  private handleKeyUp = (e: KeyboardEvent) => {
+    if (e.key === 'Shift') {
+      this.shiftHeld = false
+      this.hideElevTip()
+    }
+  }
+  private handleBlur = () => {
+    this.shiftHeld = false
+    this.hideElevTip()
+  }
+  /** Shift 押下中にマウス位置の標高を出すツールチップ（コンテナ直下に置く） */
+  private elevTip: HTMLDivElement
+  private shiftHeld = false
   private mesh: THREE.Mesh | null = null
   private terrainVisible = true
   private gridVisible = true
@@ -391,6 +405,7 @@ export class TerrainViewer {
     })
     dom.addEventListener('pointermove', (e) => {
       if (Math.hypot(e.clientX - downX, e.clientY - downY) > 4) moved = true
+      this.updateElevTip(e)
       // ドラッグ中：地形上の位置に追従させる
       if (this.draggingSearch) {
         const p = this.terrainHit(e)
@@ -457,9 +472,45 @@ export class TerrainViewer {
 
     this.resizeObs = new ResizeObserver(() => this.resize())
     this.resizeObs.observe(container)
+    dom.addEventListener('pointerleave', () => this.hideElevTip())
     window.addEventListener('keydown', this.handleKeyDown)
+    window.addEventListener('keyup', this.handleKeyUp)
+    window.addEventListener('blur', this.handleBlur)
+    this.elevTip = document.createElement('div')
+    this.elevTip.className = 'elev-tip'
+    this.elevTip.hidden = true
+    container.appendChild(this.elevTip)
     this.resize()
     this.animate()
+  }
+
+  /**
+   * Shift 押下中：マウス直下の地形の標高（m）をツールチップ表示する。
+   * レイキャストで当たったワールド座標を (u,v) に戻し、高さグリッドをバイリニア補間する
+   * （表示用の縦スケールや海抜基準の持ち上げには影響されない実標高）。
+   */
+  private updateElevTip(e: PointerEvent) {
+    if (!this.shiftHeld || !this.geo) {
+      this.hideElevTip()
+      return
+    }
+    const p = this.terrainHit(e)
+    if (!p) {
+      this.hideElevTip()
+      return
+    }
+    const g = this.geo
+    const u = p.x / (g.widthMeters * g.k) + 0.5
+    const v = p.z / (g.heightMeters * g.k) + 0.5
+    const ele = this.sampleHeight(u, v)
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    this.elevTip.style.left = `${e.clientX - rect.left + 14}px`
+    this.elevTip.style.top = `${e.clientY - rect.top + 14}px`
+    this.elevTip.textContent = `${Math.round(ele).toLocaleString()} m`
+    this.elevTip.hidden = false
+  }
+  private hideElevTip() {
+    this.elevTip.hidden = true
   }
 
   /** 左下に表示する小さな軸ギズモを組み立てる（東=X赤 / 上=Y緑(矢印のみ) / 北=Z青） */
@@ -1293,6 +1344,15 @@ export class TerrainViewer {
   private surfaceWorldY(u: number, v: number): number {
     const g = this.geo
     if (!g) return 0
+    const ele = this.sampleHeight(u, v)
+    // メッシュと同じ縦オフセット（海抜基準 ON なら実標高、OFF なら最低地点=0）。
+    return (this.seaLevelBase ? ele : ele - g.minEle) * g.k
+  }
+
+  /** 高さグリッドをバイリニア補間して (u,v) の実標高（m）を返す */
+  private sampleHeight(u: number, v: number): number {
+    const g = this.geo
+    if (!g) return 0
     const fc = Math.max(0, Math.min(g.cols - 1, u * (g.cols - 1)))
     const fr = Math.max(0, Math.min(g.rows - 1, v * (g.rows - 1)))
     const c0 = Math.floor(fc)
@@ -1306,9 +1366,7 @@ export class TerrainViewer {
     const e10 = h[r0 * g.cols + c1]
     const e01 = h[r1 * g.cols + c0]
     const e11 = h[r1 * g.cols + c1]
-    const ele = (e00 * (1 - tx) + e10 * tx) * (1 - ty) + (e01 * (1 - tx) + e11 * tx) * ty
-    // メッシュと同じ縦オフセット（海抜基準 ON なら実標高、OFF なら最低地点=0）。
-    return (this.seaLevelBase ? ele : ele - g.minEle) * g.k
+    return (e00 * (1 - tx) + e10 * tx) * (1 - ty) + (e01 * (1 - tx) + e11 * tx) * ty
   }
 
   /** ドラッグ中：地点のマーカー・線・ラベルを地形上の base 位置へ移動する */
@@ -2440,6 +2498,9 @@ export class TerrainViewer {
   dispose() {
     cancelAnimationFrame(this.raf)
     window.removeEventListener('keydown', this.handleKeyDown)
+    window.removeEventListener('keyup', this.handleKeyUp)
+    window.removeEventListener('blur', this.handleBlur)
+    this.elevTip.remove()
     this.resizeObs.disconnect()
     if (this.trans && this.trans.kind !== 'morph') {
       this.disposeGroup(this.trans.oldGroup) // morph は旧グループ破棄済み（新は terrainGroup として下で破棄）

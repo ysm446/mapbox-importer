@@ -156,6 +156,21 @@ body {
   position: absolute;
   inset: 0;
 }
+/* Shift 押下中にマウス位置の標高を表示するツールチップ（マウスの右下に追従）。地図と 3D で共用 */
+#map-elev-tip,
+#viewer3d .elev-tip {
+  position: absolute;
+  z-index: 11;
+  pointer-events: none;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: rgba(20, 24, 32, 0.88);
+  color: #fff;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
 #map-overlay {
   position: absolute;
   top: 12px;
@@ -170,6 +185,24 @@ body {
 }
 #map-overlay select {
   width: auto;
+}
+#coord-form {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin: 0;
+}
+#coord-form input {
+  width: 220px;
+  margin: 0;
+}
+#coord-form input.invalid {
+  border-color: #e05a5a;
+  box-shadow: 0 0 0 1px #e05a5a;
+}
+#coord-form button {
+  margin: 0;
+  white-space: nowrap;
 }
 #btn-draw.active,
 #btn-map-3d.active,

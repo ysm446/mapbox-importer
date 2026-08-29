@@ -717,6 +717,176 @@ const map = new maplibregl.Map({
 })
 map.addControl(new maplibregl.NavigationControl(), 'bottom-right')
 
+// ---- Shift 押下中：マウス位置の標高をツールチップ表示 ----
+// 地図の terrain（3D 表示）が無効でも動くよう、Mapbox Terrain-RGB の 256px タイルを
+// 直接取得してデコードする。タイルはズーム/座標ごとにキャッシュし、同じタイル内の
+// 移動ではネットワークアクセスしない。
+const elevTip = $('map-elev-tip')
+const ELEV_TILE_MAX_ZOOM = 14
+const ELEV_TILE_PX = 256
+const ELEV_TILE_CACHE_MAX = 256
+const elevTileCache = new Map<string, Promise<Uint8ClampedArray | null>>()
+let shiftHeld = false
+let elevReq = 0
+
+function fetchElevTile(z: number, x: number, y: number): Promise<Uint8ClampedArray | null> {
+  const key = `${z}/${x}/${y}`
+  const hit = elevTileCache.get(key)
+  if (hit) return hit
+  const p = (async () => {
+    try {
+      const url = `https://api.mapbox.com/v4/mapbox.terrain-rgb/${z}/${x}/${y}.pngraw?access_token=${token}`
+      const res = await fetch(url)
+      if (!res.ok) return null
+      const bmp = await createImageBitmap(await res.blob())
+      const cv = new OffscreenCanvas(ELEV_TILE_PX, ELEV_TILE_PX)
+      const ctx = cv.getContext('2d')!
+      ctx.drawImage(bmp, 0, 0, ELEV_TILE_PX, ELEV_TILE_PX)
+      bmp.close()
+      return ctx.getImageData(0, 0, ELEV_TILE_PX, ELEV_TILE_PX).data
+    } catch {
+      return null
+    }
+  })()
+  if (elevTileCache.size >= ELEV_TILE_CACHE_MAX) {
+    const oldest = elevTileCache.keys().next().value
+    if (oldest !== undefined) elevTileCache.delete(oldest)
+  }
+  elevTileCache.set(key, p)
+  return p
+}
+
+/** 経緯度の標高（m）を Terrain-RGB タイルから取得。取得不能なら null。 */
+async function sampleMapElevation(lng: number, lat: number): Promise<number | null> {
+  const z = Math.max(0, Math.min(ELEV_TILE_MAX_ZOOM, Math.floor(map.getZoom())))
+  // mercator は 512px タイル基準なので 256px タイル用に半分にする
+  const px = lonPx(lng, z) / 2
+  const py = latPx(lat, z) / 2
+  const n = Math.pow(2, z)
+  const tx = Math.min(n - 1, Math.max(0, Math.floor(px / ELEV_TILE_PX)))
+  const ty = Math.min(n - 1, Math.max(0, Math.floor(py / ELEV_TILE_PX)))
+  const data = await fetchElevTile(z, tx, ty)
+  if (!data) return null
+  const ix = Math.min(ELEV_TILE_PX - 1, Math.max(0, Math.floor(px - tx * ELEV_TILE_PX)))
+  const iy = Math.min(ELEV_TILE_PX - 1, Math.max(0, Math.floor(py - ty * ELEV_TILE_PX)))
+  const i = (iy * ELEV_TILE_PX + ix) * 4
+  return -10000 + (data[i] * 65536 + data[i + 1] * 256 + data[i + 2]) * 0.1
+}
+
+function hideElevTip() {
+  elevTip.hidden = true
+  elevReq++
+}
+
+map.on('mousemove', (e) => {
+  if (!shiftHeld || !token) return
+  const el = e.originalEvent.target as HTMLElement | null
+  if (el && el.closest('#left-pane, #map-overlay')) {
+    hideElevTip()
+    return
+  }
+  const req = ++elevReq
+  elevTip.style.left = `${e.point.x + 14}px`
+  elevTip.style.top = `${e.point.y + 14}px`
+  const { lng, lat } = e.lngLat
+  void sampleMapElevation(lng, lat).then((ele) => {
+    if (req !== elevReq) return // 古い結果（マウスが動いた／Shift を離した）
+    elevTip.textContent = ele == null ? t('map.elev.none') : `${Math.round(ele).toLocaleString()} m`
+    elevTip.hidden = false
+  })
+})
+map.on('mouseout', hideElevTip)
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Shift') shiftHeld = true
+})
+document.addEventListener('keyup', (e) => {
+  if (e.key === 'Shift') {
+    shiftHeld = false
+    hideElevTip()
+  }
+})
+window.addEventListener('blur', () => {
+  shiftHeld = false
+  hideElevTip()
+})
+
+// ---- 座標貼り付けで地図を移動 ----
+// Google マップ等でコピーした文字列を [lat, lng] に解釈する。対応形式:
+//   10進      "35.3606, 138.7274" / "35.3606 138.7274"
+//   度分秒    35°21'38.2"N 138°43'38.6"E
+//   URL       ".../@35.3606,138.7274,12z" / "?q=35.3606,138.7274" / "ll=..."
+function parseLatLng(text: string): [number, number] | null {
+  const s = text.trim()
+  if (!s) return null
+  const inRange = (lat: number, lng: number) =>
+    Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180
+
+  // 度分秒（N/S/E/W 付き）
+  const dms =
+    /(\d+(?:\.\d+)?)\s*[°º]\s*(?:(\d+(?:\.\d+)?)\s*['′]\s*)?(?:(\d+(?:\.\d+)?)\s*(?:"|″|'')\s*)?([NSEW])/gi
+  const parts: { v: number; h: string }[] = []
+  for (const mt of s.matchAll(dms)) {
+    const v = Number(mt[1]) + (mt[2] ? Number(mt[2]) / 60 : 0) + (mt[3] ? Number(mt[3]) / 3600 : 0)
+    parts.push({ v, h: mt[4].toUpperCase() })
+  }
+  if (parts.length === 2) {
+    const latP = parts.find((p) => p.h === 'N' || p.h === 'S')
+    const lngP = parts.find((p) => p.h === 'E' || p.h === 'W')
+    if (latP && lngP) {
+      const lat = latP.h === 'S' ? -latP.v : latP.v
+      const lng = lngP.h === 'W' ? -lngP.v : lngP.v
+      return inRange(lat, lng) ? [lat, lng] : null
+    }
+  }
+
+  // URL 内の座標（@lat,lng / q=lat,lng / ll=lat,lng / query=lat,lng。"," は %2C の場合あり）
+  const um = s.match(
+    /(?:@|[?&](?:q|ll|query|center)=)(-?\d+(?:\.\d+)?)(?:,|%2C)(-?\d+(?:\.\d+)?)/i
+  )
+  if (um) {
+    const lat = Number(um[1])
+    const lng = Number(um[2])
+    if (inRange(lat, lng)) return [lat, lng]
+  }
+
+  // 10進（カンマ / 空白区切り）
+  const dm = s.match(/^(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)$/)
+  if (dm) {
+    const lat = Number(dm[1])
+    const lng = Number(dm[2])
+    if (inRange(lat, lng)) return [lat, lng]
+  }
+  return null
+}
+
+let coordMarker: maplibregl.Marker | null = null
+;(() => {
+  const form = $<HTMLFormElement>('coord-form')
+  const input = $<HTMLInputElement>('coord-input')
+  const go = () => {
+    const parsed = parseLatLng(input.value)
+    if (!parsed) {
+      input.classList.add('invalid')
+      input.title = t('map.coord.invalid')
+      return
+    }
+    input.classList.remove('invalid')
+    input.title = ''
+    const [lat, lng] = parsed
+    input.value = `${lat.toFixed(6)}, ${lng.toFixed(6)}`
+    if (!coordMarker) coordMarker = new maplibregl.Marker({ color: '#e05a5a' })
+    coordMarker.setLngLat([lng, lat]).addTo(map)
+    map.flyTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), 12), duration: 800 })
+  }
+  form.addEventListener('submit', (e) => {
+    e.preventDefault()
+    go()
+  })
+  // 貼り付け直後に自動で移動（値の反映後に評価）
+  input.addEventListener('paste', () => setTimeout(go, 0))
+  input.addEventListener('input', () => input.classList.remove('invalid'))
+})()
+
 function locationFitPadding(): number {
   const canvas = map.getCanvas()
   const shortest = Math.min(canvas.clientWidth || 0, canvas.clientHeight || 0)
