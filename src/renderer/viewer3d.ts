@@ -183,7 +183,6 @@ export class TerrainViewer {
   private compareItems: CompareTerrain[] = []
   private compareGroups: THREE.Group[] = []
   private compareTex = new Map<string, THREE.Texture>() // id → 衛星テクスチャ
-  private compareLabels: THREE.Sprite[] = [] // 地形名ラベル（画面固定サイズの補正対象）
   // setSatelliteTexture が退避した旧衛星テクスチャ（旧メッシュが消えるまで破棄を遅延）。
   private pendingDisposeTex: THREE.Texture | null = null
   // 進行中のトランジション状態（animate() で毎フレーム更新）。
@@ -1746,7 +1745,6 @@ export class TerrainViewer {
   private rebuildCompare() {
     for (const g of this.compareGroups) this.disposeGroup(g, Array.from(this.compareTex.values()))
     this.compareGroups = []
-    this.compareLabels = []
     if (this.compareItems.length === 0) return
     const k = WORLD_SCALE
     const mainHalf = (this.terrainGroup?.userData.halfExtent as number | undefined) ?? 0
@@ -1821,29 +1819,8 @@ export class TerrainViewer {
     const halfWorld = (gridSpan * k) / 2
     group.userData.halfExtent = halfWorld
 
-    // 名前ラベル：地形の最高点より少し上に浮かせる（常に手前に描く）
-    const annot = this.scaleAnnotations ? (maxDim * k) / 2 : 1
-    const label = makeLabelSprite(item.name, 0xffffff, 0.12 * annot)
-    label.position.set(0, baseY + (maxEle - minEle) * k + 0.12 * annot * 1.5, 0)
-    label.userData.designScale = label.scale.clone()
-    group.add(label)
-    this.compareLabels.push(label)
+    // 比較地形には名前ラベルを出さない（どれがどれかはビューポート左上のチップ帯で示す）。
     return group
-  }
-
-  /** 比較地形の名前ラベルを「画面に対して一定サイズ」設定へ追従させる（毎フレーム）。 */
-  private updateCompareLabelScale() {
-    if (!this.fixedLabelSize || this.compareLabels.length === 0) return
-    const h = this.container.clientHeight || 1
-    const fovR = (this.camera.fov * Math.PI) / 180
-    const cam = this.camera.position
-    const wp = new THREE.Vector3()
-    for (const sp of this.compareLabels) {
-      sp.getWorldPosition(wp)
-      const dist = cam.distanceTo(wp)
-      const pxPerWorld = h / (2 * Math.tan(fovR / 2) * Math.max(dist, 1e-3))
-      this.applyFixedLabelScale(sp, pxPerWorld, h)
-    }
   }
 
   /** 主地形＋比較地形すべてのメッシュを包むワールド境界ボックス（比較地形がなければ null）。 */
@@ -2600,7 +2577,6 @@ export class TerrainViewer {
     const isMorph = this.trans?.kind === 'morph'
     if (!this.trans || isMorph) this.declutterLabels()
     this.updateSearchLabelScale()
-    this.updateCompareLabelScale()
     // メインシーン
     this.renderer.setViewport(0, 0, this.container.clientWidth, this.container.clientHeight)
     this.renderer.setScissorTest(false)
@@ -2696,7 +2672,6 @@ export class TerrainViewer {
     if (this.terrainGroup) this.disposeGroup(this.terrainGroup)
     for (const g of this.compareGroups) this.disposeGroup(g)
     this.compareGroups = []
-    this.compareLabels = []
     this.compareItems = []
     this.compareTex.clear() // テクスチャは disposeGroup でメッシュと一緒に破棄済み
     this.pendingDisposeTex?.dispose()
