@@ -14,7 +14,7 @@ import type {
   AppSettings,
   RootInfo
 } from '../preload/index'
-import { TerrainViewer, type SearchWhich } from './viewer3d'
+import { TerrainViewer, type SearchWhich, type CompareTerrain } from './viewer3d'
 import {
   buildRouteGraph,
   snapToGraph,
@@ -41,6 +41,9 @@ const ICON_DRAG =
   '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>'
 const ICON_ENTER =
   '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>'
+// 比較（3D 空間に並べる）：横に並んだ2つの矩形
+const ICON_COMPARE =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="8" height="12" rx="1"/><rect x="13" y="6" width="8" height="12" rx="1"/></svg>'
 
 declare global {
   interface Window {
@@ -1535,6 +1538,7 @@ function showTab(which: 'map' | '2d' | '3d') {
     viewer.setLandmarks(landmarks) // 初回生成時にも反映
     viewer.setRoutes(routes) // 保存済みルートを地形にドレープ
     applyRouteSearchToViewer() // 経路探索モード中なら発着・経路も戻す
+    applyCompare() // 比較地形（ビューワ初回生成時にも反映）
   }
 }
 tabMap.addEventListener('click', () => showTab('map'))
@@ -1655,6 +1659,98 @@ renderModeSel.addEventListener('change', () => {
   api.setSettings({ renderMode: mode })
 })
 
+// ---- 比較地形（3D 空間に他ロケーションを並べる） ----
+// ライブラリの「比較」ボタンで追加した順に、主地形の東側へ実寸比で並べる。
+// 主地形として選択中のものは並べない（同じ地形が二重に出るため）。
+const compareItems: CompareTerrain[] = []
+const compareStrip = $('viewer3d-compare')
+
+function applyCompare() {
+  viewer?.setCompareTerrains(compareItems.filter((c) => c.id !== selectedId))
+  renderCompareStrip()
+  for (const li of libList.querySelectorAll<HTMLElement>('.lib-item')) {
+    const on = compareItems.some((c) => c.id === li.dataset.id)
+    li.classList.toggle('compared', on)
+    const b = li.querySelector<HTMLButtonElement>('.lib-compare')
+    if (b) {
+      b.classList.toggle('active', on)
+      b.title = t(on ? 'lib.compareRemove' : 'lib.compare')
+      b.setAttribute('aria-label', b.title)
+    }
+  }
+}
+
+/** 3D ビューポート左上：比較中ロケーションのチップ一覧（× で外す／すべて外す）。 */
+function renderCompareStrip() {
+  compareStrip.innerHTML = ''
+  compareStrip.hidden = compareItems.length === 0
+  if (compareItems.length === 0) return
+  // 寸法情報（行数が変わる）の直下に置く
+  const infoBottom = viewer3dInfo.textContent ? viewer3dInfo.offsetTop + viewer3dInfo.offsetHeight : 72
+  compareStrip.style.top = `${infoBottom + 8}px`
+  const title = document.createElement('span')
+  title.className = 'compare-title'
+  title.textContent = t('compare.title')
+  compareStrip.appendChild(title)
+  for (const c of compareItems) {
+    const chip = document.createElement('span')
+    chip.className = 'compare-chip'
+    if (c.id === selectedId) {
+      chip.classList.add('is-main')
+      chip.title = t('compare.isMain')
+    }
+    const name = document.createElement('span')
+    name.textContent = c.name
+    const x = document.createElement('button')
+    x.type = 'button'
+    x.textContent = '×'
+    x.title = t('lib.compareRemove')
+    x.addEventListener('click', () => removeCompare(c.id))
+    chip.append(name, x)
+    compareStrip.appendChild(chip)
+  }
+  const clear = document.createElement('button')
+  clear.type = 'button'
+  clear.className = 'compare-clear'
+  clear.textContent = t('compare.clear')
+  clear.addEventListener('click', () => {
+    compareItems.length = 0
+    applyCompare()
+  })
+  compareStrip.appendChild(clear)
+}
+
+function removeCompare(id: string) {
+  const i = compareItems.findIndex((c) => c.id === id)
+  if (i >= 0) compareItems.splice(i, 1)
+  applyCompare()
+}
+
+/** 比較に追加／比較から外す（トグル）。追加時は 3D タブへ切り替えて並んだ様子を見せる。 */
+async function toggleCompare(id: string) {
+  if (compareItems.some((c) => c.id === id)) {
+    removeCompare(id)
+    return
+  }
+  progress.textContent = t('load.loading')
+  try {
+    const item = await api.getWorkspace(id)
+    if (compareItems.some((c) => c.id === id)) return // 待機中に二重クリック
+    compareItems.push({
+      id,
+      name: item.workspace.name,
+      mesh: item.mesh,
+      satelliteDataUrl: item.satelliteDataUrl
+    })
+    resetStatus()
+    showTab('3d') // ビューワ生成後に applyCompare が呼ばれる
+    applyCompare()
+  } catch (err) {
+    resetStatus()
+    alert(t('load.failed') + (err as Error).message)
+  }
+}
+
 // ---- プレビュー表示の共通処理 ----
 // 直近に選択したアイテムの衛星テクスチャ（3Dタブ初回表示時に適用するため保持）
 let pendingSatellite: string | null = null
@@ -1694,6 +1790,8 @@ function showPreview(
   // 3Dビューポート上のタイトル（ロケーション名）・寸法情報を更新
   viewer3dTitle.textContent = workspace.name
   updateViewer3dInfo(mesh, h)
+  // 主地形が変わったので比較地形の並びを更新（選択中のものは並べない）。寸法情報の後に呼ぶ（帯の位置決め）
+  applyCompare()
 
   // このワークスペースのランドマークを反映（詳細モードへは入らない＝選択のみ）。
   // viewer 有: 上の setData で反映済み（演出のフェード対象に含めるため）。
@@ -2718,6 +2816,12 @@ async function refreshLibrary() {
           await api.renameWorkspace(e.id, newName)
           // 選択中ロケーションなら 3D タイトルも更新
           if (e.id === selectedId) viewer3dTitle.textContent = newName
+          // 比較中ならラベル名も更新
+          const c = compareItems.find((x) => x.id === e.id)
+          if (c) {
+            c.name = newName
+            applyCompare()
+          }
         }
         await refreshLibrary()
       }
@@ -2769,6 +2873,8 @@ async function refreshLibrary() {
         btnUpdateTerrain.disabled = true
         clearAnnotations()
       }
+      // 比較中なら 3D 空間からも外す
+      if (compareItems.some((c) => c.id === e.id)) removeCompare(e.id)
       await refreshLibrary()
     })
 
@@ -2815,13 +2921,23 @@ async function refreshLibrary() {
       enterWorkspace(e.id)
     })
 
+    // 比較ボタン（3D 空間で主地形の横に並べる／外す）
+    const cmp = document.createElement('button')
+    cmp.className = 'lib-icon lib-compare'
+    cmp.innerHTML = ICON_COMPARE
+    cmp.addEventListener('click', (ev) => {
+      ev.stopPropagation()
+      toggleCompare(e.id)
+    })
+
     // 1クリック=選択（地形を表示）、ダブルクリック=中に入る
     li.addEventListener('click', () => selectItem(e.id))
     li.addEventListener('dblclick', () => enterWorkspace(e.id))
-    li.append(handle, thumb, meta, edit, del, enter)
+    li.append(handle, thumb, meta, cmp, edit, del, enter)
     libList.appendChild(li)
   }
   markSelected()
+  applyCompare() // 比較ボタンの状態（active / title）を反映
 }
 
 // 連続クリック時に古い応答が新しい選択を上書きしないよう、最後の要求だけを反映する

@@ -7,6 +7,14 @@ import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeome
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import type { MeshPayload, Landmark, Route, RouteCategory } from '../preload/index'
 
+/** 主地形の隣（東側）に実寸比で並べて比較する地形 */
+export interface CompareTerrain {
+  id: string
+  name: string
+  mesh: MeshPayload
+  satelliteDataUrl: string | null
+}
+
 // 全地形で共通の表示スケール（メートル→ワールド単位）。地形ごとに正規化せず
 // 固定倍率で表示するので、ワークスペースを切り替えると実サイズの差がそのまま見える。
 // 1ワールド単位 = この実距離(m)。約10km四方の地形が最大辺 2 ワールド単位に収まる目安。
@@ -171,6 +179,11 @@ export class TerrainViewer {
   private transition: 'none' | 'slide' | 'wipe' | 'morph' = 'none'
   // 現在の地形プレゼンテーション（mesh + grid + 軸ラベル）をまとめたグループ。
   private terrainGroup: THREE.Group | null = null
+  // 比較地形（主地形の東側に並べる）。グループは setData / 表示設定変更のたびに作り直す。
+  private compareItems: CompareTerrain[] = []
+  private compareGroups: THREE.Group[] = []
+  private compareTex = new Map<string, THREE.Texture>() // id → 衛星テクスチャ
+  private compareLabels: THREE.Sprite[] = [] // 地形名ラベル（画面固定サイズの補正対象）
   // setSatelliteTexture が退避した旧衛星テクスチャ（旧メッシュが消えるまで破棄を遅延）。
   private pendingDisposeTex: THREE.Texture | null = null
   // 進行中のトランジション状態（animate() で毎フレーム更新）。
@@ -556,7 +569,8 @@ export class TerrainViewer {
   private focusOrbitOnModelCenter() {
     if (!this.mesh) return
     this.mesh.updateWorldMatrix(true, false)
-    const center = new THREE.Box3().setFromObject(this.mesh).getCenter(new THREE.Vector3())
+    const box = this.compareBounds() ?? new THREE.Box3().setFromObject(this.mesh)
+    const center = box.getCenter(new THREE.Vector3())
     const delta = center.clone().sub(this.controls.target)
     if (delta.lengthSq() < 1e-10) return
     this.startFocusMove(center, this.camera.position.clone().add(delta))
@@ -565,11 +579,13 @@ export class TerrainViewer {
   private fitOrbitToModel() {
     if (!this.mesh || !this.lastPayload) return
     this.mesh.updateWorldMatrix(true, false)
-    const center = new THREE.Box3().setFromObject(this.mesh).getCenter(new THREE.Vector3())
+    const cmpBox = this.compareBounds()
+    const box = cmpBox ?? new THREE.Box3().setFromObject(this.mesh)
+    const center = box.getCenter(new THREE.Vector3())
     const dir = new THREE.Vector3().subVectors(this.camera.position, this.controls.target)
     if (dir.lengthSq() < 1e-10) dir.set(0, Math.sin(Math.PI / 6), Math.cos(Math.PI / 6))
     dir.normalize()
-    const fitDist = this.fitDistFor(this.lastPayload)
+    const fitDist = cmpBox ? this.fitDistForBox(cmpBox) : this.fitDistFor(this.lastPayload)
     const cameraTarget = center.clone().addScaledVector(dir, fitDist)
     this.camera.near = Math.min(this.camera.near, Math.max(0.001, fitDist / 100))
     this.camera.far = Math.max(this.camera.far, fitDist * 10, this.camera.position.distanceTo(this.controls.target) * 1.2)
@@ -1696,6 +1712,166 @@ export class TerrainViewer {
     }
   }
 
+  // ---- 比較地形（同じ 3D 空間に他ロケーションを並べる） ----
+
+  /**
+   * 主地形の東側に並べる比較地形を設定する（順番どおり西→東）。
+   * 描画モード・海抜基準・表示/非表示は主地形と共通。id の集合が変わったときは全体が収まるようフィットする。
+   */
+  setCompareTerrains(items: CompareTerrain[]) {
+    const prevIds = this.compareItems.map((c) => c.id).join('\n')
+    const nextIds = items.map((c) => c.id).join('\n')
+    // 不要になった衛星テクスチャを破棄
+    for (const [id, tex] of this.compareTex) {
+      if (!items.some((c) => c.id === id && c.satelliteDataUrl)) {
+        tex.dispose()
+        this.compareTex.delete(id)
+      }
+    }
+    // 新規に衛星画像を持つものは非同期で読み込み、完了後に作り直す
+    for (const c of items) {
+      if (!c.satelliteDataUrl || this.compareTex.has(c.id)) continue
+      const tex = new THREE.TextureLoader().load(c.satelliteDataUrl, () => {
+        if (this.compareTex.get(c.id) === tex) this.rebuildCompare()
+      })
+      tex.colorSpace = THREE.SRGBColorSpace
+      this.compareTex.set(c.id, tex)
+    }
+    this.compareItems = items.slice()
+    this.rebuildCompare()
+    if (prevIds !== nextIds && this.mesh) this.fitOrbitToModel()
+  }
+
+  /** 比較地形グループを作り直し、主地形（グリッド端）の東側に隙間を空けて並べる。 */
+  private rebuildCompare() {
+    for (const g of this.compareGroups) this.disposeGroup(g, Array.from(this.compareTex.values()))
+    this.compareGroups = []
+    this.compareLabels = []
+    if (this.compareItems.length === 0) return
+    const k = WORLD_SCALE
+    const mainHalf = (this.terrainGroup?.userData.halfExtent as number | undefined) ?? 0
+    const mainDim = this.lastPayload
+      ? Math.max(this.lastPayload.widthMeters, this.lastPayload.heightMeters)
+      : 0
+    let cursor = mainHalf // 次の地形の西端（ワールド X）
+    for (const item of this.compareItems) {
+      const g = this.buildCompareGroup(item)
+      const half = g.userData.halfExtent as number
+      const dim = Math.max(item.mesh.widthMeters, item.mesh.heightMeters)
+      const gap = Math.max(mainDim, dim) * k * 0.1 // 隙間は大きい方の 10%
+      g.position.x = cursor + gap + half
+      cursor = g.position.x + half
+      this.scene.add(g)
+      this.compareGroups.push(g)
+    }
+  }
+
+  /** 比較地形 1 件ぶんのグループ（メッシュ＋グリッド＋名前ラベル）を作る。原点中心。 */
+  private buildCompareGroup(item: CompareTerrain): THREE.Group {
+    const { cols, rows, minEle, maxEle, widthMeters, heightMeters } = item.mesh
+    const heights = new Float32Array(item.mesh.heights)
+    const k = WORLD_SCALE
+    const group = new THREE.Group()
+    group.userData.compareId = item.id
+
+    const geo = new THREE.PlaneGeometry(widthMeters, heightMeters, cols - 1, rows - 1)
+    geo.rotateX(-Math.PI / 2)
+    const span = maxEle - minEle || 1
+    const pos = geo.attributes.position as THREE.BufferAttribute
+    const tex = this.compareTex.get(item.id) ?? null
+    const useTex = this.renderMode === 'satellite' && !!tex
+    const grayscale = this.renderMode === 'heightmap'
+    const colors = new Float32Array(pos.count * 3)
+    for (let i = 0; i < pos.count; i++) {
+      const ele = heights[i] ?? minEle
+      pos.setY(i, ele - minEle)
+      const t = (ele - minEle) / span
+      const col = grayscale ? [t, t, t] : ramp(t)
+      colors[i * 3] = col[0]
+      colors[i * 3 + 1] = col[1]
+      colors[i * 3 + 2] = col[2]
+    }
+    pos.needsUpdate = true
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    geo.computeVertexNormals()
+    const mat = new THREE.MeshStandardMaterial({
+      vertexColors: !useTex,
+      map: useTex ? tex : null,
+      roughness: 0.95,
+      metalness: 0.0,
+      flatShading: false
+    })
+    const mesh = new THREE.Mesh(geo, mat)
+    mesh.userData.isTerrainMesh = true
+    mesh.visible = this.terrainVisible
+    mesh.scale.setScalar(k)
+    // 海抜基準は主地形と同じ扱い（ON なら実標高に浮かせる＝高さの比較ができる）
+    const baseY = this.seaLevelBase ? minEle * k : 0
+    mesh.position.y = baseY
+    group.add(mesh)
+
+    const maxDim = Math.max(widthMeters, heightMeters) || 1
+    const gridStep = niceStep(maxDim / 10)
+    const gridSpan = Math.ceil(maxDim / gridStep) * gridStep
+    const divisions = Math.round(gridSpan / gridStep)
+    const grid = new THREE.GridHelper(gridSpan * k, divisions, 0x5a7a9a, 0x3a4a5a)
+    grid.userData.isGridObject = true
+    grid.visible = this.gridVisible
+    group.add(grid)
+    const halfWorld = (gridSpan * k) / 2
+    group.userData.halfExtent = halfWorld
+
+    // 名前ラベル：地形の最高点より少し上に浮かせる（常に手前に描く）
+    const annot = this.scaleAnnotations ? (maxDim * k) / 2 : 1
+    const label = makeLabelSprite(item.name, 0xffffff, 0.12 * annot)
+    label.position.set(0, baseY + (maxEle - minEle) * k + 0.12 * annot * 1.5, 0)
+    label.userData.designScale = label.scale.clone()
+    group.add(label)
+    this.compareLabels.push(label)
+    return group
+  }
+
+  /** 比較地形の名前ラベルを「画面に対して一定サイズ」設定へ追従させる（毎フレーム）。 */
+  private updateCompareLabelScale() {
+    if (!this.fixedLabelSize || this.compareLabels.length === 0) return
+    const h = this.container.clientHeight || 1
+    const fovR = (this.camera.fov * Math.PI) / 180
+    const cam = this.camera.position
+    const wp = new THREE.Vector3()
+    for (const sp of this.compareLabels) {
+      sp.getWorldPosition(wp)
+      const dist = cam.distanceTo(wp)
+      const pxPerWorld = h / (2 * Math.tan(fovR / 2) * Math.max(dist, 1e-3))
+      this.applyFixedLabelScale(sp, pxPerWorld, h)
+    }
+  }
+
+  /** 主地形＋比較地形すべてのメッシュを包むワールド境界ボックス（比較地形がなければ null）。 */
+  private compareBounds(): THREE.Box3 | null {
+    if (!this.mesh || this.compareGroups.length === 0) return null
+    this.mesh.updateWorldMatrix(true, false)
+    const box = new THREE.Box3().setFromObject(this.mesh)
+    for (const g of this.compareGroups) {
+      g.updateWorldMatrix(true, true)
+      g.traverse((o) => {
+        if (o.userData?.isTerrainMesh) box.union(new THREE.Box3().setFromObject(o))
+      })
+    }
+    return box
+  }
+
+  /** 境界ボックスが縦横とも画角に収まる距離。 */
+  private fitDistForBox(box: THREE.Box3): number {
+    const size = box.getSize(new THREE.Vector3())
+    const fov = (this.camera.fov * Math.PI) / 180
+    const vRadius = Math.hypot(size.z / 2, size.y / 2)
+    const vDist = vRadius / Math.sin(fov / 2)
+    const hHalf = Math.tan(fov / 2) * Math.max(this.camera.aspect, 0.1)
+    const hDist = (size.x / 2) / hHalf + size.z / 2 // 奥行きぶんの余裕を足す
+    // 斜め上から見るため手前側が拡大して見える。端が切れないよう 2割の余裕を持たせる。
+    return Math.max(vDist, hDist) * 1.2
+  }
+
   /** 描画モードを設定（default / heightmap / satellite）。見た目のみの更新でカメラは維持 */
   setRenderMode(mode: 'default' | 'heightmap' | 'satellite') {
     this.renderMode = mode
@@ -1723,6 +1899,7 @@ export class TerrainViewer {
       })
     }
     apply(this.terrainGroup)
+    for (const g of this.compareGroups) apply(g)
     if (this.trans) {
       if (this.trans.kind === 'slide' || this.trans.kind === 'wipe') {
         apply(this.trans.oldGroup)
@@ -1746,6 +1923,7 @@ export class TerrainViewer {
       })
     }
     apply(this.terrainGroup)
+    for (const g of this.compareGroups) apply(g)
     if (this.trans) {
       if (this.trans.kind === 'slide' || this.trans.kind === 'wipe') {
         apply(this.trans.oldGroup)
@@ -1964,19 +2142,26 @@ export class TerrainViewer {
     else if (isMorph && oldPayload)
       this.startMorph(oldPayload, group, geo, cols, rows, span, grayscale, useTex, widthMeters, heightMeters, oldTex)
 
+    // 比較地形は主地形の広さに合わせて並べ直す（描画モード等の変更にも追従）
+    this.rebuildCompare()
+
     // --- カメラのフィッティング ---
     // 「縦いっぱい」に収まる距離を画角（垂直FOV）から求める（fitDistFor）。
+    // 比較地形があるときは全体を包むボックスで縦横とも収める。
     const sizeY = (maxEle - minEle) * k
-    const centerY = baseY + sizeY / 2 // 注視点の高さ（ボックス中心。海抜基準なら実標高ぶん持ち上げ）
-    const fitDist = this.fitDistFor(payload)
+    const cmpBox = this.compareBounds()
+    const cmpCenter = cmpBox?.getCenter(new THREE.Vector3()) ?? null
+    const centerX = cmpCenter?.x ?? 0
+    const centerY = cmpCenter?.y ?? baseY + sizeY / 2 // 注視点の高さ（ボックス中心。海抜基準なら実標高ぶん持ち上げ）
+    const fitDist = cmpBox ? this.fitDistForBox(cmpBox) : this.fitDistFor(payload)
 
     if (doFit) {
       // 初回データ時は必ず全体にフィット（位置・注視点・クリップを置き直す）。
       this.hasFittedCamera = true
       this.zoomTarget = null // フィットでカメラを置き直すので進行中のズームは破棄
-      this.controls.target.set(0, centerY, 0) // 注視点はボックス中心（高さ方向中心）
+      this.controls.target.set(centerX, centerY, 0) // 注視点はボックス中心（高さ方向中心）
       const elev = (30 * Math.PI) / 180 // 斜め上から見下ろす（水平から約30°）
-      this.camera.position.set(0, centerY + fitDist * Math.sin(elev), fitDist * Math.cos(elev))
+      this.camera.position.set(centerX, centerY + fitDist * Math.sin(elev), fitDist * Math.cos(elev))
       this.camera.near = Math.max(0.001, fitDist / 100)
       this.camera.far = fitDist * 10
       this.camera.updateProjectionMatrix()
@@ -2415,6 +2600,7 @@ export class TerrainViewer {
     const isMorph = this.trans?.kind === 'morph'
     if (!this.trans || isMorph) this.declutterLabels()
     this.updateSearchLabelScale()
+    this.updateCompareLabelScale()
     // メインシーン
     this.renderer.setViewport(0, 0, this.container.clientWidth, this.container.clientHeight)
     this.renderer.setScissorTest(false)
@@ -2508,6 +2694,11 @@ export class TerrainViewer {
     }
     this.trans = null
     if (this.terrainGroup) this.disposeGroup(this.terrainGroup)
+    for (const g of this.compareGroups) this.disposeGroup(g)
+    this.compareGroups = []
+    this.compareLabels = []
+    this.compareItems = []
+    this.compareTex.clear() // テクスチャは disposeGroup でメッシュと一緒に破棄済み
     this.pendingDisposeTex?.dispose()
     this.satelliteTex?.dispose()
     this.landmarks = []
