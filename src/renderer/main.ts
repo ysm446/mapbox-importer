@@ -1145,19 +1145,19 @@ function setBBoxFields(w: number, s: number, e: number, n: number) {
   updateEstimate()
 }
 
-// ---- 2のべき乗スナップ ----
-const snapCheckbox = $<HTMLInputElement>('snap-pow2')
-let snapPow2 = false
+// ---- ブロック（512px=タイル1枚）スナップ ----
+const snapCheckbox = $<HTMLInputElement>('snap-block')
+let snapBlock = false
 snapCheckbox.addEventListener('change', () => {
-  snapPow2 = snapCheckbox.checked
+  snapBlock = snapCheckbox.checked
   // 既に範囲があれば即スナップ（北西を固定）
   const b = currentBBox()
-  if (snapPow2 && [b.west, b.south, b.east, b.north].every((v) => !isNaN(v))) {
+  if (snapBlock && [b.west, b.south, b.east, b.north].every((v) => !isNaN(v))) {
     const z = parseInt(zoomInput.value)
-    const s = snapToPow2(b.west, b.south, b.east, b.north, z, 'w', 'n')
+    const s = snapToBlock(b.west, b.south, b.east, b.north, z, 'w', 'n')
     setBBoxFields(s.west, s.south, s.east, s.north)
   }
-  api.setSettings({ snapPow2 })
+  api.setSettings({ snapBlock })
 })
 
 // ---- マウスで矩形を描いて範囲選択 ----
@@ -1191,12 +1191,12 @@ function finishDraw(p: maplibregl.LngLat) {
   const n = Math.max(drawStart.lat, p.lat)
   // クリックだけ（ドラッグなし）の誤操作を無視
   if (Math.abs(east - w) > 1e-5 && Math.abs(n - s) > 1e-5) {
-    if (snapPow2) {
+    if (snapBlock) {
       // 描き始めの角を固定してスナップ
       const ax = drawStart.lng <= p.lng ? 'w' : 'e'
       const ay = drawStart.lat >= p.lat ? 'n' : 's'
       const z = parseInt(zoomInput.value)
-      const sp = snapToPow2(w, s, east, n, z, ax, ay)
+      const sp = snapToBlock(w, s, east, n, z, ax, ay)
       setBBoxFields(sp.west, sp.south, sp.east, sp.north)
     } else {
       setBBoxFields(w, s, east, n)
@@ -1255,12 +1255,12 @@ map.on('mousedown', 'bbox-handles', (e) => {
 function endCornerDrag() {
   if (!dragCorner) return
   // 離した時にスナップ（動かした角の反対側を固定）
-  if (snapPow2) {
+  if (snapBlock) {
     const b = currentBBox()
     const ax = dragCorner.includes('w') ? 'e' : 'w'
     const ay = dragCorner.includes('n') ? 's' : 'n'
     const z = parseInt(zoomInput.value)
-    const sp = snapToPow2(b.west, b.south, b.east, b.north, z, ax, ay)
+    const sp = snapToBlock(b.west, b.south, b.east, b.north, z, ax, ay)
     setBBoxFields(sp.west, sp.south, sp.east, sp.north)
   }
   dragCorner = null
@@ -1295,7 +1295,7 @@ map.on('mousemove', (e) => {
 map.on('mouseup', endCornerDrag)
 
 // ---- 矩形本体（塗り）を左ドラッグして全体移動 ----
-// サイズは変えずに平行移動するので、2のべき乗サイズも保たれる。
+// サイズは変えずに平行移動するので、512の倍数サイズも保たれる。
 let movingBox = false
 let moveLast: maplibregl.LngLat | null = null
 
@@ -1319,8 +1319,8 @@ map.on('mousedown', 'bbox-fill', (e) => {
 /** 矩形の平行移動を終了（スナップ＋状態リセット）。ウィンドウ外リリースでも呼ぶ */
 function endBoxMove() {
   if (!movingBox) return
-  // 2のべき乗モード時は、離した位置でタイル境界へ吸着（サイズは維持）
-  if (snapPow2) {
+  // スナップON時は、離した位置でタイル境界へ吸着（サイズは維持）
+  if (snapBlock) {
     const b = currentBBox()
     const z = parseInt(zoomInput.value)
     const sp = snapOriginToTile(b.west, b.south, b.east, b.north, z)
@@ -1361,17 +1361,18 @@ for (const el of [westI, eastI, southI, northI]) {
 // ---- 解像度の推定（座標変換は shared/mercator.ts を使用） ----
 
 /** 最も近い 2 のべき乗に丸める（最小32px） */
-function nearestPow2(px: number): number {
-  if (px < 1) return 32
-  const p = Math.round(Math.log2(px))
-  return Math.max(32, 2 ** p)
+/** ピクセル数を最寄りのブロック境界（TILE=512 の倍数）へ丸める。最小 1 ブロック。 */
+function nearestBlock(px: number): number {
+  if (px < 1) return TILE
+  return Math.max(TILE, Math.round(px / TILE) * TILE)
 }
 
 /**
- * 出力ピクセルが 2 のべき乗になるよう bbox を調整する。
+ * 出力ピクセルが 1 ブロック（TILE=512px）の倍数になるよう bbox を調整する。
+ * 横と縦を独立に丸めるので、縦横比は 2:1 などに縛られず 3:2 や 4:3 も作れる。
  * anchorX/anchorY が固定する辺（'w'/'e', 'n'/'s'）。
  */
-function snapToPow2(
+function snapToBlock(
   west: number,
   south: number,
   east: number,
@@ -1380,11 +1381,11 @@ function snapToPow2(
   anchorX: 'w' | 'e',
   anchorY: 'n' | 's'
 ) {
-  const tW = nearestPow2(lonPx(east, z) - lonPx(west, z))
+  const tW = nearestBlock(lonPx(east, z) - lonPx(west, z))
   if (anchorX === 'w') east = pxLon(lonPx(west, z) + tW, z)
   else west = pxLon(lonPx(east, z) - tW, z)
 
-  const tH = nearestPow2(latPx(south, z) - latPx(north, z))
+  const tH = nearestBlock(latPx(south, z) - latPx(north, z))
   if (anchorY === 'n') south = pxLat(latPx(north, z) + tH, z)
   else north = pxLat(latPx(south, z) - tH, z)
 
@@ -3027,8 +3028,9 @@ btnImportZip.addEventListener('click', async () => {
     currentStyleKey = settings.mapStyle
     mapStyleSel.value = currentStyleKey
   }
-  if (settings.snapPow2) {
-    snapPow2 = true
+  // 旧キー snapPow2（2のべき乗スナップ）の設定も引き継ぐ
+  if (settings.snapBlock ?? settings.snapPow2) {
+    snapBlock = true
     snapCheckbox.checked = true
   }
   // 3Dビューポートの描画モード・地点表示を復元（既定は default / 表示）

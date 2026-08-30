@@ -76,6 +76,8 @@ export interface RootInfo {
 export interface AppSettings {
   mapStyle?: string
   lang?: 'ja' | 'en'
+  snapBlock?: boolean
+  /** 旧キー（2のべき乗スナップ）。既存の設定ファイルから引き継ぐためだけに残す。 */
   snapPow2?: boolean
   renderMode?: 'default' | 'heightmap' | 'satellite'
   backgroundColor?: string
