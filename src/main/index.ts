@@ -10,6 +10,7 @@ import {
   normalizeTo16bit,
   buildPreviewPng,
   exportPng16,
+  exportPng16Gray,
   exportRaw16,
   sampleElevation
 } from './heightmap'
@@ -631,26 +632,28 @@ app.whenReady().then(() => {
   )
 
   // --- ワークスペース: ハイトマップを PNG16 / R16 で書き出す ---
-  ipcMain.handle('workspace:export', async (_e, id: string, format: 'png16' | 'raw16') => {
+  ipcMain.handle('workspace:export', async (_e, id: string, format: 'png16gray' | 'png16' | 'raw16') => {
     const dir = await ensureDataDir()
     const ws = await getWorkspace(dir, id)
     if (!ws) throw new Error('ワークスペースが見つかりません。')
     const h = ws.heightmap
 
     const values16 = await readValues16(dir, id)
-    const ext = format === 'png16' ? 'png' : 'r16'
+    const isPng = format === 'png16gray' || format === 'png16'
+    const ext = isPng ? 'png' : 'r16'
     const fileName = `${ws.name}_${h.width}x${h.height}.${ext}`.replace(/[\\/:*?"<>|]/g, '_')
     const { canceled, filePath } = await dialog.showSaveDialog({
       title: 'ハイトマップを書き出し',
       defaultPath: join(dir, fileName),
-      filters:
-        format === 'png16'
-          ? [{ name: '16bit PNG', extensions: ['png'] }]
-          : [{ name: 'RAW 16bit (R16)', extensions: ['r16', 'raw'] }]
+      filters: isPng
+        ? [{ name: '16bit PNG', extensions: ['png'] }]
+        : [{ name: 'RAW 16bit (R16)', extensions: ['r16', 'raw'] }]
     })
     if (canceled || !filePath) return { saved: false }
 
-    if (format === 'png16') {
+    if (format === 'png16gray') {
+      await exportPng16Gray(filePath, h.width, h.height, values16)
+    } else if (format === 'png16') {
       await exportPng16(filePath, h.width, h.height, values16)
     } else {
       await exportRaw16(filePath, values16)

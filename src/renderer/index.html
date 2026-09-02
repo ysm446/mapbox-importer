@@ -320,7 +320,10 @@
                   <label for="export-texture-format" data-i18n="export.textureFormat">形式</label>
                   <div class="row" style="gap: 8px">
                     <select id="export-texture-format">
-                      <option value="png16" data-i18n="btn.exportPng">PNG16 書き出し</option>
+                      <option value="png16gray" data-i18n="btn.exportPngGray">
+                        PNG16 グレースケール 書き出し
+                      </option>
+                      <option value="png16" data-i18n="btn.exportPng">PNG16 RGBA 書き出し</option>
                       <option value="raw16" data-i18n="btn.exportRaw">R16 書き出し</option>
                     </select>
                     <button id="btn-export-texture" disabled data-i18n="btn.exportTexture">

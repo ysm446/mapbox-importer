@@ -2983,7 +2983,8 @@ async function selectItem(id: string): Promise<boolean> {
 // ---- エクスポート（選択中アイテム） ----
 btnExportTexture.addEventListener('click', async () => {
   if (!selectedId) return
-  const format = exportTextureFormat.value === 'raw16' ? 'raw16' : 'png16'
+  const v = exportTextureFormat.value
+  const format = v === 'raw16' ? 'raw16' : v === 'png16' ? 'png16' : 'png16gray'
   try {
     const r = await api.exportItem(selectedId, format)
     if (r.saved) progress.textContent = t('export.saved') + r.filePath

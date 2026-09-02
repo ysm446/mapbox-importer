@@ -116,6 +116,37 @@ function physChunk(ppuX = 3780, ppuY = 3780, unit = 1): Buffer {
 }
 
 /**
+ * 16bit グレースケール PNG として書き出す（1チャンネル・値は 0..65535）。
+ * 読み込み側で 0.0〜1.0 に正規化される、ハイトマップ標準の形式。
+ */
+export async function exportPng16Gray(
+  filePath: string,
+  width: number,
+  height: number,
+  values16: Uint16Array
+): Promise<void> {
+  const png = new PNG({
+    width,
+    height,
+    colorType: 0, // グレースケール
+    bitDepth: 16,
+    inputColorType: 0,
+    inputHasAlpha: false
+  })
+  // pngjs は 16bit 入力をプラットフォームのエンディアンで解釈し、BE に直して書き出す。
+  // そのため素の Uint16Array（ネイティブ順）をそのまま渡す。
+  const src = new Uint16Array(values16)
+  png.data = Buffer.from(src.buffer, 0, src.byteLength)
+  const out = PNG.sync.write(png, {
+    colorType: 0,
+    bitDepth: 16,
+    inputColorType: 0,
+    inputHasAlpha: false
+  })
+  await fs.writeFile(filePath, withPhys(out))
+}
+
+/**
  * 16bit RGBA PNG として書き出す（R=G=B=標高値, A=不透明 65535）。
  * World Machine / Gaea 等の「16bit RGBA + pHYs」ハイトマップ出力に合わせた形式。
  */
@@ -144,11 +175,14 @@ export async function exportPng16(
     buf.writeUInt16BE(65535, o + 6) // A（不透明）
   }
   png.data = buf
-  let out = PNG.sync.write(png, { colorType: 6, bitDepth: 16, inputColorType: 6 })
-  // IHDR チャンク（8byte sig + 25byte IHDR）の直後に pHYs を挿入する
+  const out = PNG.sync.write(png, { colorType: 6, bitDepth: 16, inputColorType: 6 })
+  await fs.writeFile(filePath, withPhys(out))
+}
+
+/** IHDR チャンク（8byte sig + 25byte IHDR）の直後に pHYs を挿入する */
+function withPhys(png: Buffer): Buffer {
   const afterIhdr = 33
-  out = Buffer.concat([out.subarray(0, afterIhdr), physChunk(), out.subarray(afterIhdr)])
-  await fs.writeFile(filePath, out)
+  return Buffer.concat([png.subarray(0, afterIhdr), physChunk(), png.subarray(afterIhdr)])
 }
 
 /** R16 raw（リトルエンディアン uint16、UE / World Machine 互換）として書き出す */

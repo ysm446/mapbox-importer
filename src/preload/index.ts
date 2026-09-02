@@ -161,7 +161,7 @@ const api = {
   getThumb: (id: string): Promise<string | null> => ipcRenderer.invoke('workspace:thumb', id),
   exportItem: (
     id: string,
-    format: 'png16' | 'raw16'
+    format: 'png16gray' | 'png16' | 'raw16'
   ): Promise<{ saved: boolean; filePath?: string }> =>
     ipcRenderer.invoke('workspace:export', id, format),
   // ロケーションを ZIP でバックアップ / 復元
